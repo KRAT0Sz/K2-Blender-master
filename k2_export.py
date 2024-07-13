@@ -372,7 +372,7 @@ def export_k2_clip(filename, transform, frame_start, frame_end):
     scene = bpy.context.scene
     pose = armob.pose
     
-    for frame in range(frame_start, frame_end):
+    for frame in range(frame_start, frame_end + 1):
         scene.frame_set(frame)
         
         for bone in pose.bones:
@@ -393,9 +393,9 @@ def export_k2_clip(filename, transform, frame_start, frame_end):
             motion[MKEY_X].append(translation[0])
             motion[MKEY_Y].append(translation[1])
             motion[MKEY_Z].append(translation[2])
-            motion[MKEY_PITCH].append(-degrees(rotation[0]))
-            motion[MKEY_ROLL].append(-degrees(rotation[1]))
-            motion[MKEY_YAW].append(-degrees(rotation[2]))
+            motion[MKEY_PITCH].append(degrees(rotation[0]))  # Changed sign to correct flipped animation
+            motion[MKEY_ROLL].append(degrees(rotation[1]))  # Changed sign to correct flipped animation
+            motion[MKEY_YAW].append(degrees(rotation[2]))  # Changed sign to correct flipped animation
             motion[MKEY_SCALE_X].append(scale[0])
             motion[MKEY_SCALE_Y].append(scale[1])
             motion[MKEY_SCALE_Z].append(scale[2])
@@ -404,7 +404,7 @@ def export_k2_clip(filename, transform, frame_start, frame_end):
     headdata = BytesIO()
     headdata.write(struct.pack("<i", 2))
     headdata.write(struct.pack("<i", len(motions.keys())))
-    headdata.write(struct.pack("<i", frame_end - frame_start))
+    headdata.write(struct.pack("<i", frame_end - frame_start + 1))
     
     # Ensure directory exists
     os.makedirs(os.path.dirname(filename), exist_ok=True)
@@ -440,6 +440,4 @@ def ClipBone(file, bone_name, motion, index):
             keydata.write(struct.pack('<%df' % numkeys, *key))
         write_block(file, 'bmtn', keydata.getvalue())
 
-# Call to test
-export_k2_mesh("C:/Users/XiaoYan/ExportedMesh.k2", applyMods=True)
-export_k2_clip("C:/Users/XiaoYan/ExportedClip.k2", transform=True, frame_start=1, frame_end=250)
+

@@ -1,8 +1,10 @@
-For blender 3+ (tested with 3.1)
-TODO(?):
-    vertex colors import/export
-    SURFs
-    two-sided faces? (detect+merge on import, split on export)
 
-Fixes numeric instabilities in rig roll value computation for the most part. Some issues still remain
-See branches for blender 2.78 and 2.91 scripts
+For Blender 3+ (tested with 4.1)
+TODO(?):
+
+Import/export vertex colors
+SURFs
+Two-sided faces? (detect and merge on import, split on export)
+Fix numeric instabilities in rig roll value computation for the most part, but some issues still remain
+Animation export is still not as expected
+See branches for Blender 2.78 and 2.91 scripts

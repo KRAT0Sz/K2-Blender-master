@@ -11,7 +11,7 @@ bl_info = {
     "description": "Import-Export meshes and animations used by K2 engine (Savage 2 and Heroes of Newerth games)",
     "warning": "",
     "wiki_url": "https://github.com/KRAT0Sz/K2-Blender-master-v2/wiki",
-    "tracker_url": "https://github.com/theli-ua/K2-Blender/issues",
+    "tracker_url": "https://discord.gg/T4dwSUP",
     "category": "Import-Export"
 }
 

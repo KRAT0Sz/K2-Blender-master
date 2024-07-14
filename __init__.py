@@ -5,8 +5,8 @@ import os
 bl_info = {
     "name": "K2 Model/Animation Import-Export",
     "author": "Anton Romanov",
-    "version": (0, 0, 2),
-    "blender": (4, 10, 1),
+    "version": (1, 0, 0),
+    "blender": (4, 0, 1),
     "location": "File > Import-Export > K2 model/clip",
     "description": "Import-Export meshes and animations used by K2 engine (Savage 2 and Heroes of Newerth games)",
     "warning": "",
@@ -59,26 +59,35 @@ class K2Importer(bpy.types.Operator):
         from . import k2_import
         k2_import.read(self.filepath, self.flipuv)
 
+        # Create a special context that includes VIEW_3D type areas and regions
+        found_view3d = False
+        for window in bpy.context.window_manager.windows:
+            screen = window.screen
+            for area in screen.areas:
+                if area.type == 'VIEW_3D':
+                    for region in area.regions:
+                        if region.type == 'WINDOW':
+                            override = {
+                                'window': window,
+                                'screen': screen,
+                                'area': area,
+                                'region': region,
+                                'scene': context.scene,
+                            }
+                            with context.temp_override(**override):
+                                bpy.ops.view3d.view_all(center=False)
+                            found_view3d = True
+                            break
+                if found_view3d:
+                    break
+            if found_view3d:
+                break
 
-    def view_all_in_3d_view():
-        for area in bpy.context.screen.areas:
-            if area.type == 'VIEW_3D':
-                for region in area.regions:
-                    if region.type == 'WINDOW':
-                        override = {
-                        'area': area,
-                        'region': region,
-                        'screen': bpy.context.screen,
-                        'scene': bpy.context.scene,
-                        'window': bpy.context.window
-                    }
-                    # ใช้ 'EXEC_DEFAULT' เป็น context และส่งพารามิเตอร์ในรูปแบบ keyword arguments
-                    bpy.ops.view3d.view_all(override, 'EXEC_DEFAULT', center=False)
-                    return True
-                    return False
+        if not found_view3d:
+            self.report({'WARNING'}, "Failed to focus on 3D view.")
+            return {'CANCELLED'}
 
-
-
+        return {'FINISHED'}
 
 
     def invoke(self, context, event):
@@ -197,6 +206,5 @@ def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(menu_export)
 
 # Main entry point
-if __name__ == "__main__":
-    register()
-
+    if __name == "__main__":
+        register()

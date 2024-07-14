@@ -1,4 +1,3 @@
-
 import bpy
 import bmesh
 import struct
@@ -180,9 +179,9 @@ def create_blender_mesh(filename, objname, flipuv):
 
             vlog(f"Version {version}")
             vlog(f"{num_meshes} mesh(es)")
-            vlog(f"{num_sprites} sprites(es)")
-            vlog(f"{num_surfs} surfs(es)")
-            vlog(f"{num_bones} bones(es)")
+            vlog(f"{num_sprites} sprite(s)")
+            vlog(f"{num_surfs} surf(s)")
+            vlog(f"{num_bones} bone(s)")
             vlog("Bounding box: (%f, %f, %f) - (%f, %f, %f)" % struct.unpack("<ffffff", honchunk.read(24)))
             honchunk.skip()
 
@@ -424,20 +423,35 @@ def create_blender_mesh(filename, objname, flipuv):
                 bpy.context.view_layer.objects.active = None
 
             bpy.context.view_layer.update()
-
-            # Adjust view to make the imported object visible
-            for area in bpy.context.screen.areas:
-                if area.type == 'VIEW_3D':
-                    for region in area.regions:
-                        if region.type == 'WINDOW':
-                            with bpy.context.temp_override(window=bpy.context.window, area=area, region=region):
-                                bpy.ops.view3d.view_all(center=False)
-                            break
-
-            return obj, rig
-
+            
     except IOError as e:
         log(f"File IO Error: {e}")
+    except Exception as e:
+        log(f"Unexpected error: {e}")
+
+    return obj, rig  # Assuming you want to return the created objects
+
+
+def view_all_in_3d_view():
+    # Find the correct area and region for a 3D View
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            for region in area.regions:
+                if region.type == 'WINDOW':
+                    override = {
+                        'area': area,
+                        'region': region,
+                        'screen': bpy.context.screen,
+                        'scene': bpy.context.scene
+                    }
+                    # Call the operator with the overridden context
+                    bpy.ops.view3d.view_all(override, center=False)
+                    return True
+    return False  # Return False if no 3D View is found
+
+
+    return obj, rig  # Assuming you want to return the created objects
+
 
 ##############################
 # CLIPS

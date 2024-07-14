@@ -8,7 +8,7 @@ Install
 
 <hr/>
 
-<h3 align="center"> </h3>
-All errors have been fixed. Hoho, I think so, yeah.
+<h3 align="center">All errors have been fixed. Hoho, I think so, yeah.</h3>
+
 If you encounter any errors, please let me know.
 <br/>

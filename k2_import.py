@@ -7,7 +7,7 @@ from mathutils import Vector, Matrix, Euler
 import math
 from bpy.props import *
 
-# ระดับของการล็อก
+# Log level
 IMPORT_LOG_LEVEL = 3
 
 def log(msg):
@@ -36,7 +36,7 @@ def parse_links(honchunk, bone_names):
     numverts = read_int(honchunk)
     log("Parsing links")
     vlog(f"Mesh index: {mesh_index}")
-    vlog(f"Vertices number: {numverts}")
+    vlog(f"Number of vertices: {numverts}")
 
     vgroups = {}
     for i in range(numverts):
@@ -108,13 +108,13 @@ def parse_texc(honchunk, version):
     return [struct.unpack("<2f", honchunk.read(8)) for _ in range(numverts)]
 
 def parse_colr(honchunk):
-    vlog('Parsing vertex colours chunk')
+    vlog('Parsing vertex colors chunk')
     numverts = int((honchunk.chunksize - 4) / 4)
     meshindex = read_int(honchunk)
     return [struct.unpack("<4B", honchunk.read(4)) for _ in range(numverts)]
 
 def parse_surf(honchunk):
-    vlog('Parsing surf chunk')
+    vlog('Parsing surface chunk')
     surfindex = read_int(honchunk)
     num_planes = read_int(honchunk)
     num_points = read_int(honchunk)
@@ -343,10 +343,10 @@ def create_blender_mesh(filename, objname, flipuv):
                                 vgroups = parse_links(honchunk, bone_names)
                             elif honchunk.getname() == b'sign':
                                 signs = parse_sign(honchunk)
-                            elif honchunk.getname() == b'tang':
+                            elif honchunk.getname == b'tang':
                                 honchunk.skip()
                             else:
-                                vlog(f'Unknown chunk: {honchunk.chunkname}')
+                                vlog(f'Unknown chunk: {honchunk.getname()}')
                                 honchunk.skip()
                 elif honchunk.getname() == b'surf':
                     surf_planes, surf_points, surf_edges, surf_tris = parse_surf(honchunk)
@@ -423,34 +423,33 @@ def create_blender_mesh(filename, objname, flipuv):
                 bpy.context.view_layer.objects.active = None
 
             bpy.context.view_layer.update()
-            
+
+            view_all_in_3d_view()
+
     except IOError as e:
         log(f"File IO Error: {e}")
     except Exception as e:
         log(f"Unexpected error: {e}")
-
     return obj, rig  # Assuming you want to return the created objects
-
 
 def view_all_in_3d_view():
-    # Find the correct area and region for a 3D View
-    for area in bpy.context.screen.areas:
-        if area.type == 'VIEW_3D':
-            for region in area.regions:
-                if region.type == 'WINDOW':
-                    override = {
-                        'area': area,
-                        'region': region,
-                        'screen': bpy.context.screen,
-                        'scene': bpy.context.scene
-                    }
-                    # Call the operator with the overridden context
-                    bpy.ops.view3d.view_all(override, center=False)
-                    return True
-    return False  # Return False if no 3D View is found
-
-
-    return obj, rig  # Assuming you want to return the created objects
+    for window in bpy.context.window_manager.windows:
+        screen = window.screen
+        for area in screen.areas:
+            if area.type == 'VIEW_3D':
+                for region in area.regions:
+                    if region.type == 'WINDOW':
+                        override = {
+                            'window': window,
+                            'screen': screen,
+                            'area': area,
+                            'region': region,
+                            'scene': bpy.context.scene,
+                        }
+                        with bpy.context.temp_override(**override):
+                            bpy.ops.view3d.view_all(center=False)
+                        return True
+    return False
 
 
 ##############################
@@ -531,8 +530,8 @@ def create_blender_clip(filename, clipname):
             num_bones = read_int(clipchunk)
             num_frames = read_int(clipchunk)
             vlog(f"Version: {version}")
-            vlog(f"Num bones: {num_bones}")
-            vlog(f"Num frames: {num_frames}")
+            vlog(f"Number of bones: {num_bones}")
+            vlog(f"Number of frames: {num_frames}")
 
             if not bpy.context.selected_objects:
                 err('No object selected')
@@ -567,7 +566,7 @@ def create_blender_clip(filename, clipname):
 
                 if name not in motions:
                     motions[name] = {}
-                dlog(f"{name}, boneindex: {boneindex}, keytype: {keytype}, numkeys: {numkeys}")
+                dlog(f"{name}, bone index: {boneindex}, key type: {keytype}, number of keys: {numkeys}")
                 if keytype == MKEY_VISIBILITY:
                     data = struct.unpack(f"{numkeys}B", clipchunk.read(numkeys))
                 else:

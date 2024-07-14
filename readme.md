@@ -1,5 +1,5 @@
 
-<br/>For Blender 4.0+<hr/>
+<br align="center">For Blender 4.0+<br/>
 
 Install
 

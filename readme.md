@@ -1,7 +1,6 @@
 
-<br/>
-For Blender 4.0+
-<hr/>
+<br/>For Blender 4.0+<hr/>
+
 Install
 
 > [!NOTE]

@@ -5,8 +5,8 @@ import os
 bl_info = {
     "name": "K2 Model/Animation Import-Export",
     "author": "Anton Romanov",
-    "version": (0, 2),
-    "blender": (4, 1, 0),
+    "version": (0, 0, 2),
+    "blender": (4, 10, 1),
     "location": "File > Import-Export > K2 model/clip",
     "description": "Import-Export meshes and animations used by K2 engine (Savage 2 and Heroes of Newerth games)",
     "warning": "",
@@ -58,9 +58,28 @@ class K2Importer(bpy.types.Operator):
     def execute(self, context):
         from . import k2_import
         k2_import.read(self.filepath, self.flipuv)
-        # Focus on imported model
-        bpy.ops.view3d.view_all(center=False)
-        return {'FINISHED'}
+
+
+    def view_all_in_3d_view():
+        for area in bpy.context.screen.areas:
+            if area.type == 'VIEW_3D':
+                for region in area.regions:
+                    if region.type == 'WINDOW':
+                        override = {
+                        'area': area,
+                        'region': region,
+                        'screen': bpy.context.screen,
+                        'scene': bpy.context.scene,
+                        'window': bpy.context.window
+                    }
+                    # ใช้ 'EXEC_DEFAULT' เป็น context และส่งพารามิเตอร์ในรูปแบบ keyword arguments
+                    bpy.ops.view3d.view_all(override, 'EXEC_DEFAULT', center=False)
+                    return True
+                    return False
+
+
+
+
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
@@ -180,3 +199,4 @@ def unregister():
 # Main entry point
 if __name__ == "__main__":
     register()
+

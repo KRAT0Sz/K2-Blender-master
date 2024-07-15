@@ -1,5 +1,6 @@
 import bpy
 from bpy.props import StringProperty, BoolProperty, IntProperty
+from bpy.utils import previews
 import os
 
 bl_info = {
@@ -8,203 +9,169 @@ bl_info = {
     "version": (1, 0, 0),
     "blender": (4, 0, 1),
     "location": "File > Import-Export > K2 model/clip",
-    "description": "Import-Export meshes and animations used by K2 engine (Savage 2 Strife and Heroes of Newerth games)",
+    "description": "Import-Export meshes and animations used by K2 engine (Savage 2 and Heroes of Newerth games)",
     "warning": "",
     "wiki_url": "https://github.com/KRAT0Sz/K2-Blender-master-v2/wiki",
     "tracker_url": "https://discord.gg/T4dwSUP",
     "category": "Import-Export"
 }
 
-# Operator for importing K2/Silverlight clip data
-class K2ImporterClip(bpy.types.Operator):
-    """Load K2/Silverlight clip data"""
-    bl_idname = "import_clip.k2"
+# Import the necessary modules
+from . import k2_import
+from . import k2_export
+
+# Load the logo image
+def load_logo():
+    global custom_icons
+    custom_icons = previews.new()
+    icons_dir = os.path.join(os.path.dirname(__file__), "icons")
+    custom_icons.load("logo", os.path.join(icons_dir, "logo.png"), 'IMAGE')
+
+def clear_logo():
+    global custom_icons
+    previews.remove(custom_icons)
+
+class K2_OT_Import(bpy.types.Operator):
+    """Import K2 Model"""
+    bl_idname = "wm.k2_import"
+    bl_label = "Import K2 Model"
+
+    def execute(self, context):
+        import_path = context.scene.k2_import_path
+        try:
+            if not os.path.exists(import_path):
+                self.report({'ERROR'}, f"Invalid path: {import_path}")
+                return {'CANCELLED'}
+            k2_import.read(import_path, True)  # Adjusted to use provided function
+            self.report({'INFO'}, f"Imported model from: {import_path}")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to import model: {str(e)}")
+        return {'FINISHED'}
+
+class K2_OT_Export(bpy.types.Operator):
+    """Export K2 Model"""
+    bl_idname = "wm.k2_export"
+    bl_label = "Export K2 Model"
+
+    def execute(self, context):
+        export_path = context.scene.k2_export_path
+        try:
+            if not os.path.exists(os.path.dirname(export_path)):
+                self.report({'ERROR'}, f"Invalid path: {export_path}")
+                return {'CANCELLED'}
+            k2_export.export_k2_mesh(export_path, context.scene.k2_apply_modifiers)
+            self.report({'INFO'}, f"Exported model to: {export_path}")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to export model: {str(e)}")
+        return {'FINISHED'}
+
+class K2_OT_ImportClip(bpy.types.Operator):
+    """Import K2 Clip"""
+    bl_idname = "wm.k2_import_clip"
     bl_label = "Import K2 Clip"
 
-    filepath: StringProperty(
-        subtype='FILE_PATH'
-    )
-    filter_glob: StringProperty(
-        default="*.clip", options={'HIDDEN'}
-    )
-
     def execute(self, context):
-        from . import k2_import
-        k2_import.readclip(self.filepath)
+        import_path = context.scene.k2_import_clip_path
+        try:
+            if not os.path.exists(import_path):
+                self.report({'ERROR'}, f"Invalid path: {import_path}")
+                return {'CANCELLED'}
+            k2_import.readclip(import_path)  # Adjusted to use provided function
+            self.report({'INFO'}, f"Imported clip from: {import_path}")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to import clip: {str(e)}")
         return {'FINISHED'}
 
-    def invoke(self, context, event):
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
-
-# Operator for importing K2/Silverlight mesh data
-class K2Importer(bpy.types.Operator):
-    """Load K2/Silverlight mesh data"""
-    bl_idname = "import_mesh.k2"
-    bl_label = "Import K2 Mesh"
-
-    filepath: StringProperty(
-        subtype='FILE_PATH'
-    )
-    filter_glob: StringProperty(
-        default="*.model", options={'HIDDEN'}
-    )
-    flipuv: BoolProperty(
-        name="Flip UV",
-        description="Flip UV",
-        default=True
-    )
-
-    def execute(self, context):
-        from . import k2_import
-        k2_import.read(self.filepath, self.flipuv)
-
-        # Create a special context that includes VIEW_3D type areas and regions
-        found_view3d = False
-        for window in bpy.context.window_manager.windows:
-            screen = window.screen
-            for area in screen.areas:
-                if area.type == 'VIEW_3D':
-                    for region in area.regions:
-                        if region.type == 'WINDOW':
-                            override = {
-                                'window': window,
-                                'screen': screen,
-                                'area': area,
-                                'region': region,
-                                'scene': context.scene,
-                            }
-                            with context.temp_override(**override):
-                                bpy.ops.view3d.view_all(center=False)
-                            found_view3d = True
-                            break
-                if found_view3d:
-                    break
-            if found_view3d:
-                break
-
-        if not found_view3d:
-            self.report({'WARNING'}, "Failed to focus on 3D view.")
-            return {'CANCELLED'}
-
-        return {'FINISHED'}
-
-
-    def invoke(self, context, event):
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
-
-# Operator for exporting K2 triangle clip data
-class K2ClipExporter(bpy.types.Operator):
-    """Save K2 triangle clip data"""
-    bl_idname = "export_clip.k2"
+class K2_OT_ExportClip(bpy.types.Operator):
+    """Export K2 Clip"""
+    bl_idname = "wm.k2_export_clip"
     bl_label = "Export K2 Clip"
 
-    filepath: StringProperty(
-        subtype='FILE_PATH'
-    )
-    filter_glob: StringProperty(
-        default="*.clip", options={'HIDDEN'}
-    )
-    check_existing: BoolProperty(
-        name="Check Existing",
-        description="Check and warn on overwriting existing files",
-        default=True,
-        options={'HIDDEN'}
-    )
-    apply_modifiers: BoolProperty(
-        name="Apply Modifiers",
-        description="Use transformed mesh data from each object",
-        default=True
-    )
-    frame_start: IntProperty(
-        name="Start Frame",
-        description="Starting frame for the animation",
-        default=0
-    )
-    frame_end: IntProperty(
-        name="Ending Frame",
-        description="Ending frame for the animation",
-        default=250
-    )
-
     def execute(self, context):
-        from . import k2_export
-        k2_export.export_k2_clip(
-            self.filepath, self.apply_modifiers,
-            self.frame_start, self.frame_end
-        )
+        export_path = context.scene.k2_export_clip_path
+        try:
+            if not os.path.exists(os.path.dirname(export_path)):
+                self.report({'ERROR'}, f"Invalid path: {export_path}")
+                return {'CANCELLED'}
+            k2_export.export_k2_clip(export_path, context.scene.k2_frame_start, context.scene.k2_frame_end)
+            self.report({'INFO'}, f"Exported clip to: {export_path}")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to export clip: {str(e)}")
         return {'FINISHED'}
 
-    def invoke(self, context, event):
-        if not self.filepath:
-            self.filepath = bpy.path.ensure_ext(bpy.data.filepath, ".clip")
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
+class K2_PT_SettingsPanel(bpy.types.Panel):
+    """Creates a Panel in the 3D View Sidebar"""
+    bl_label = "K2 Import/Export Settings"
+    bl_idname = "VIEW3D_PT_k2_settings"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "K2 Import/Export"
 
-# Operator for exporting K2 triangle mesh data
-class K2MeshExporter(bpy.types.Operator):
-    """Save K2 triangle mesh data"""
-    bl_idname = "export_mesh.k2"
-    bl_label = "Export K2 Mesh"
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
 
-    filepath: StringProperty(
-        subtype='FILE_PATH'
-    )
-    filter_glob: StringProperty(
-        default="*.model", options={'HIDDEN'}
-    )
-    check_existing: BoolProperty(
-        name="Check Existing",
-        description="Check and warn on overwriting existing files",
-        default=True,
-        options={'HIDDEN'}
-    )
-    apply_modifiers: BoolProperty(
-        name="Apply Modifiers",
-        description="Use transformed mesh data from each object",
-        default=True
-    )
+        # Display the logo and text
+        row = layout.row()
+        row.alignment = 'CENTER'
+        row.scale_y = 1.5
+        row.label(text="S2 Games Model Import/Exporter Version 4")
+        row = layout.row()
+        row.alignment = 'RIGHT'
+        row.template_icon(custom_icons["logo"].icon_id, scale=5)
 
-    def execute(self, context):
-        from . import k2_export
-        k2_export.export_k2_mesh(self.filepath, self.apply_modifiers)
-        return {'FINISHED'}
+        layout.separator()
 
-    def invoke(self, context, event):
-        if not self.filepath:
-            self.filepath = bpy.path.ensure_ext(bpy.data.filepath, ".model")
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
+        # Import Settings
+        box = layout.box()
+        box.label(text="Import Settings", icon='IMPORT')
+        box.prop(scene, "k2_import_path", text="Model Path")
+        box.prop(scene, "k2_import_clip_path", text="Clip Path")
+        box.operator("wm.k2_import", text="Import K2 Model", icon='IMPORT')
+        box.operator("wm.k2_import_clip", text="Import K2 Clip", icon='IMPORT')
 
-# Menu function for import
-def menu_import(self, context):
-    self.layout.operator(K2Importer.bl_idname, text="K2 mesh (.model)")
-    self.layout.operator(K2ImporterClip.bl_idname, text="K2 clip (.clip)")
+        layout.separator()
 
-# Menu function for export
-def menu_export(self, context):
-    self.layout.operator(K2MeshExporter.bl_idname, text="K2 Mesh (.model)")
-    self.layout.operator(K2ClipExporter.bl_idname, text="K2 Clip (.clip)")
+        # Export Settings
+        box = layout.box()
+        box.label(text="Export Settings", icon='EXPORT')
+        box.prop(scene, "k2_export_path", text="Model Path")
+        box.prop(scene, "k2_export_clip_path", text="Clip Path")
+        box.prop(scene, "k2_apply_modifiers", text="Apply Modifiers")
+        box.prop(scene, "k2_frame_start", text="Start Frame")
+        box.prop(scene, "k2_frame_end", text="End Frame")
+        box.operator("wm.k2_export", text="Export K2 Model", icon='EXPORT')
+        box.operator("wm.k2_export_clip", text="Export K2 Clip", icon='EXPORT')
 
-# Register the add-on
 def register():
-    bpy.utils.register_class(K2ImporterClip)
-    bpy.utils.register_class(K2Importer)
-    bpy.utils.register_class(K2ClipExporter)
-    bpy.utils.register_class(K2MeshExporter)
-    bpy.types.TOPBAR_MT_file_import.append(menu_import)
-    bpy.types.TOPBAR_MT_file_export.append(menu_export)
+    load_logo()
+    bpy.utils.register_class(K2_PT_SettingsPanel)
+    bpy.utils.register_class(K2_OT_Import)
+    bpy.utils.register_class(K2_OT_Export)
+    bpy.utils.register_class(K2_OT_ImportClip)
+    bpy.utils.register_class(K2_OT_ExportClip)
+    bpy.types.Scene.k2_import_path = StringProperty(name="K2 Import Path", subtype='FILE_PATH', description="Path to import K2 model")
+    bpy.types.Scene.k2_import_clip_path = StringProperty(name="K2 Import Clip Path", subtype='FILE_PATH', description="Path to import K2 clip")
+    bpy.types.Scene.k2_export_path = StringProperty(name="K2 Export Path", subtype='FILE_PATH', description="Path to export K2 model")
+    bpy.types.Scene.k2_export_clip_path = StringProperty(name="K2 Export Clip Path", subtype='FILE_PATH', description="Path to export K2 clip")
+    bpy.types.Scene.k2_apply_modifiers = BoolProperty(name="Apply Modifiers", default=True, description="Apply modifiers on export")
+    bpy.types.Scene.k2_frame_start = IntProperty(name="Start Frame", default=0, description="Start frame for exporting clip")
+    bpy.types.Scene.k2_frame_end = IntProperty(name="End Frame", default=250, description="End frame for exporting clip")
 
-# Unregister the add-on
 def unregister():
-    bpy.utils.unregister_class(K2ImporterClip)
-    bpy.utils.unregister_class(K2Importer)
-    bpy.utils.unregister_class(K2ClipExporter)
-    bpy.utils.unregister_class(K2MeshExporter)
-    bpy.types.TOPBAR_MT_file_import.remove(menu_import)
-    bpy.types.TOPBAR_MT_file_export.remove(menu_export)
+    clear_logo()
+    bpy.utils.unregister_class(K2_PT_SettingsPanel)
+    bpy.utils.unregister_class(K2_OT_Import)
+    bpy.utils.unregister_class(K2_OT_Export)
+    bpy.utils.unregister_class(K2_OT_ImportClip)
+    bpy.utils.unregister_class(K2_OT_ExportClip)
+    del bpy.types.Scene.k2_import_path
+    del bpy.types.Scene.k2_import_clip_path
+    del bpy.types.Scene.k2_export_path
+    del bpy.types.Scene.k2_export_clip_path
+    del bpy.types.Scene.k2_apply_modifiers
+    del bpy.types.Scene.k2_frame_start
+    del bpy.types.Scene.k2_frame_end
 
-# Main entry point
-    if __name == "__main__":
-        register()
+if __name__ == "__main__":
+    register()

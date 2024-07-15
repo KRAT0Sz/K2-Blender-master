@@ -451,7 +451,6 @@ def view_all_in_3d_view():
                         return True
     return False
 
-
 ##############################
 # CLIPS
 ##############################

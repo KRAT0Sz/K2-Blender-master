@@ -20,12 +20,16 @@ bl_info = {
 from . import k2_import
 from . import k2_export
 
-# Load the logo image
+# Load the logo image from K2-Blender-master-main
 def load_logo():
     global custom_icons
     custom_icons = previews.new()
-    icons_dir = os.path.join(os.path.dirname(__file__), "icons")
-    custom_icons.load("logo", os.path.join(icons_dir, "logo.png"), 'IMAGE')
+    icons_dir = os.path.join(os.path.dirname(__file__), "..", "K2-Blender-master-main")
+    logo_path = os.path.join(icons_dir, "logo.png")
+    if os.path.exists(logo_path):
+        custom_icons.load("logo", logo_path, 'IMAGE')
+    else:
+        print(f"Logo file not found at: {logo_path}")
 
 def clear_logo():
     global custom_icons
@@ -42,7 +46,7 @@ class K2_OT_Import(bpy.types.Operator):
             if not os.path.exists(import_path):
                 self.report({'ERROR'}, f"Invalid path: {import_path}")
                 return {'CANCELLED'}
-            k2_import.read(import_path, True)  # Adjusted to use provided function
+            k2_import.read(import_path, True)
             self.report({'INFO'}, f"Imported model from: {import_path}")
         except Exception as e:
             self.report({'ERROR'}, f"Failed to import model: {str(e)}")
@@ -76,7 +80,7 @@ class K2_OT_ImportClip(bpy.types.Operator):
             if not os.path.exists(import_path):
                 self.report({'ERROR'}, f"Invalid path: {import_path}")
                 return {'CANCELLED'}
-            k2_import.readclip(import_path)  # Adjusted to use provided function
+            k2_import.readclip(import_path)
             self.report({'INFO'}, f"Imported clip from: {import_path}")
         except Exception as e:
             self.report({'ERROR'}, f"Failed to import clip: {str(e)}")
@@ -118,7 +122,10 @@ class K2_PT_SettingsPanel(bpy.types.Panel):
         row.label(text="S2 Games Model Import/Exporter Version 4")
         row = layout.row()
         row.alignment = 'RIGHT'
-        row.template_icon(custom_icons["logo"].icon_id, scale=5)
+        if "logo" in custom_icons:
+            row.template_icon(custom_icons["logo"].icon_id, scale=5)
+        else:
+            row.label(text="Logo not found", icon='ERROR')
 
         layout.separator()
 

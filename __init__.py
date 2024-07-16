@@ -16,11 +16,9 @@ bl_info = {
     "category": "Import-Export"
 }
 
-# Import the necessary modules
 from . import k2_import
 from . import k2_export
 
-# Load the logo image from K2-Blender-master-main
 def load_logo():
     global custom_icons
     custom_icons = previews.new()
@@ -36,7 +34,6 @@ def clear_logo():
     previews.remove(custom_icons)
 
 class K2_OT_Import(bpy.types.Operator):
-    """Import K2 Model"""
     bl_idname = "wm.k2_import"
     bl_label = "Import K2 Model"
 
@@ -56,7 +53,6 @@ class K2_OT_Import(bpy.types.Operator):
         return {'FINISHED'}
 
 class K2_OT_Export(bpy.types.Operator):
-    """Export K2 Model"""
     bl_idname = "wm.k2_export"
     bl_label = "Export K2 Model"
 
@@ -76,7 +72,6 @@ class K2_OT_Export(bpy.types.Operator):
         return {'FINISHED'}
 
 class K2_OT_ImportClip(bpy.types.Operator):
-    """Import K2 Clip"""
     bl_idname = "wm.k2_import_clip"
     bl_label = "Import K2 Clip"
 
@@ -96,7 +91,6 @@ class K2_OT_ImportClip(bpy.types.Operator):
         return {'FINISHED'}
 
 class K2_OT_ExportClip(bpy.types.Operator):
-    """Export K2 Clip"""
     bl_idname = "wm.k2_export_clip"
     bl_label = "Export K2 Clip"
 
@@ -116,29 +110,25 @@ class K2_OT_ExportClip(bpy.types.Operator):
         return {'FINISHED'}
 
 class K2_OT_ExportFBX(bpy.types.Operator):
-    """Export FBX Model"""
     bl_idname = "wm.k2_export_fbx"
     bl_label = "Export FBX Model"
 
     def execute(self, context):
         export_path = context.scene.k2_export_fbx_path
-        if not export_path:
-            self.report({'ERROR'}, "No export FBX path set")
+        if not export_path or not export_path.endswith(".fbx"):
+            self.report({'ERROR'}, "Export path must end with .fbx")
             return {'CANCELLED'}
-        if not export_path.lower().endswith(".fbx"):
-            export_path += ".fbx"
         try:
             if not os.path.exists(os.path.dirname(export_path)):
                 self.report({'ERROR'}, f"Invalid path: {export_path}")
                 return {'CANCELLED'}
-            bpy.ops.export_scene.fbx(filepath=export_path)
+            bpy.ops.export_scene.fbx(filepath=export_path, apply_unit_scale=True)
             self.report({'INFO'}, f"Exported FBX model to: {export_path}")
         except Exception as e:
             self.report({'ERROR'}, f"Failed to export FBX model: {str(e)}")
         return {'FINISHED'}
 
 class K2_PT_SettingsPanel(bpy.types.Panel):
-    """Creates a Panel in the 3D View Sidebar"""
     bl_label = "K2 Import/Export Settings"
     bl_idname = "VIEW3D_PT_k2_settings"
     bl_space_type = 'VIEW_3D'
@@ -149,7 +139,6 @@ class K2_PT_SettingsPanel(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
-        # Display the logo and text
         row = layout.row()
         row.alignment = 'CENTER'
         row.scale_y = 1.5
@@ -163,28 +152,37 @@ class K2_PT_SettingsPanel(bpy.types.Panel):
 
         layout.separator()
 
-        # Import Settings
         box = layout.box()
         box.label(text="Import Settings", icon='IMPORT')
         box.prop(scene, "k2_import_path", text="Model Path")
         box.prop(scene, "k2_import_clip_path", text="Clip Path")
-        box.operator("wm.k2_import", text="Import K2 Model", icon='IMPORT')
-        box.operator("wm.k2_import_clip", text="Import K2 Clip", icon='IMPORT')
+        row = box.row()
+        row.scale_y = 1.5
+        row.operator("wm.k2_import", text="Import K2 Model", icon='IMPORT')
+        row.operator("wm.k2_import_clip", text="Import K2 Clip", icon='IMPORT')
 
         layout.separator()
 
-        # Export Settings
         box = layout.box()
-        box.label(text="Export Settings", icon='EXPORT')
-        box.prop(scene, "k2_export_path", text="Model Path")
-        box.prop(scene, "k2_export_clip_path", text="Clip Path")
-        box.prop(scene, "k2_export_fbx_path", text="FBX Path")
+        box.label(text="Export K2 Settings", icon='EXPORT')
+        box.prop(scene, "k2_export_path", text="K2 Model Path")
+        box.prop(scene, "k2_export_clip_path", text="K2 Clip Path")
         box.prop(scene, "k2_apply_modifiers", text="Apply Modifiers")
         box.prop(scene, "k2_frame_start", text="Start Frame")
         box.prop(scene, "k2_frame_end", text="End Frame")
-        box.operator("wm.k2_export", text="Export K2 Model", icon='EXPORT')
-        box.operator("wm.k2_export_clip", text="Export K2 Clip", icon='EXPORT')
-        box.operator("wm.k2_export_fbx", text="Export FBX Model", icon='EXPORT')
+        row = box.row()
+        row.scale_y = 1.5
+        row.operator("wm.k2_export", text="Export K2 Model", icon='EXPORT')
+        row.operator("wm.k2_export_clip", text="Export K2 Clip", icon='EXPORT')
+
+        layout.separator()
+
+        box = layout.box()
+        box.label(text="Export FBX Settings", icon='EXPORT')
+        box.prop(scene, "k2_export_fbx_path", text="FBX Path")
+        row = box.row()
+        row.scale_y = 1.5
+        row.operator("wm.k2_export_fbx", text="Export FBX Model", icon='EXPORT')
 
 def register():
     load_logo()
@@ -198,7 +196,7 @@ def register():
     bpy.types.Scene.k2_import_clip_path = StringProperty(name="K2 Import Clip Path", subtype='FILE_PATH', description="Path to import K2 clip")
     bpy.types.Scene.k2_export_path = StringProperty(name="K2 Export Path", subtype='FILE_PATH', description="Path to export K2 model")
     bpy.types.Scene.k2_export_clip_path = StringProperty(name="K2 Export Clip Path", subtype='FILE_PATH', description="Path to export K2 clip")
-    bpy.types.Scene.k2_export_fbx_path = StringProperty(name="K2 Export FBX Path", subtype='FILE_PATH', description="Path to export FBX model")
+    bpy.types.Scene.k2_export_fbx_path = StringProperty(name="FBX Export Path", subtype='FILE_PATH', description="Path to export FBX model")
     bpy.types.Scene.k2_apply_modifiers = BoolProperty(name="Apply Modifiers", default=True, description="Apply modifiers on export")
     bpy.types.Scene.k2_frame_start = IntProperty(name="Start Frame", default=0, description="Start frame for exporting clip")
     bpy.types.Scene.k2_frame_end = IntProperty(name="End Frame", default=250, description="End frame for exporting clip")

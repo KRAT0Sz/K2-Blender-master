@@ -42,6 +42,9 @@ class K2_OT_Import(bpy.types.Operator):
 
     def execute(self, context):
         import_path = context.scene.k2_import_path
+        if not import_path:
+            self.report({'ERROR'}, "No import path set")
+            return {'CANCELLED'}
         try:
             if not os.path.exists(import_path):
                 self.report({'ERROR'}, f"Invalid path: {import_path}")
@@ -59,6 +62,9 @@ class K2_OT_Export(bpy.types.Operator):
 
     def execute(self, context):
         export_path = context.scene.k2_export_path
+        if not export_path:
+            self.report({'ERROR'}, "No export path set")
+            return {'CANCELLED'}
         try:
             if not os.path.exists(os.path.dirname(export_path)):
                 self.report({'ERROR'}, f"Invalid path: {export_path}")
@@ -76,6 +82,9 @@ class K2_OT_ImportClip(bpy.types.Operator):
 
     def execute(self, context):
         import_path = context.scene.k2_import_clip_path
+        if not import_path:
+            self.report({'ERROR'}, "No import clip path set")
+            return {'CANCELLED'}
         try:
             if not os.path.exists(import_path):
                 self.report({'ERROR'}, f"Invalid path: {import_path}")
@@ -93,6 +102,9 @@ class K2_OT_ExportClip(bpy.types.Operator):
 
     def execute(self, context):
         export_path = context.scene.k2_export_clip_path
+        if not export_path:
+            self.report({'ERROR'}, "No export clip path set")
+            return {'CANCELLED'}
         try:
             if not os.path.exists(os.path.dirname(export_path)):
                 self.report({'ERROR'}, f"Invalid path: {export_path}")
@@ -101,6 +113,28 @@ class K2_OT_ExportClip(bpy.types.Operator):
             self.report({'INFO'}, f"Exported clip to: {export_path}")
         except Exception as e:
             self.report({'ERROR'}, f"Failed to export clip: {str(e)}")
+        return {'FINISHED'}
+
+class K2_OT_ExportFBX(bpy.types.Operator):
+    """Export FBX Model"""
+    bl_idname = "wm.k2_export_fbx"
+    bl_label = "Export FBX Model"
+
+    def execute(self, context):
+        export_path = context.scene.k2_export_fbx_path
+        if not export_path:
+            self.report({'ERROR'}, "No export FBX path set")
+            return {'CANCELLED'}
+        if not export_path.lower().endswith(".fbx"):
+            export_path += ".fbx"
+        try:
+            if not os.path.exists(os.path.dirname(export_path)):
+                self.report({'ERROR'}, f"Invalid path: {export_path}")
+                return {'CANCELLED'}
+            bpy.ops.export_scene.fbx(filepath=export_path)
+            self.report({'INFO'}, f"Exported FBX model to: {export_path}")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to export FBX model: {str(e)}")
         return {'FINISHED'}
 
 class K2_PT_SettingsPanel(bpy.types.Panel):
@@ -144,11 +178,13 @@ class K2_PT_SettingsPanel(bpy.types.Panel):
         box.label(text="Export Settings", icon='EXPORT')
         box.prop(scene, "k2_export_path", text="Model Path")
         box.prop(scene, "k2_export_clip_path", text="Clip Path")
+        box.prop(scene, "k2_export_fbx_path", text="FBX Path")
         box.prop(scene, "k2_apply_modifiers", text="Apply Modifiers")
         box.prop(scene, "k2_frame_start", text="Start Frame")
         box.prop(scene, "k2_frame_end", text="End Frame")
         box.operator("wm.k2_export", text="Export K2 Model", icon='EXPORT')
         box.operator("wm.k2_export_clip", text="Export K2 Clip", icon='EXPORT')
+        box.operator("wm.k2_export_fbx", text="Export FBX Model", icon='EXPORT')
 
 def register():
     load_logo()
@@ -157,10 +193,12 @@ def register():
     bpy.utils.register_class(K2_OT_Export)
     bpy.utils.register_class(K2_OT_ImportClip)
     bpy.utils.register_class(K2_OT_ExportClip)
+    bpy.utils.register_class(K2_OT_ExportFBX)
     bpy.types.Scene.k2_import_path = StringProperty(name="K2 Import Path", subtype='FILE_PATH', description="Path to import K2 model")
     bpy.types.Scene.k2_import_clip_path = StringProperty(name="K2 Import Clip Path", subtype='FILE_PATH', description="Path to import K2 clip")
     bpy.types.Scene.k2_export_path = StringProperty(name="K2 Export Path", subtype='FILE_PATH', description="Path to export K2 model")
     bpy.types.Scene.k2_export_clip_path = StringProperty(name="K2 Export Clip Path", subtype='FILE_PATH', description="Path to export K2 clip")
+    bpy.types.Scene.k2_export_fbx_path = StringProperty(name="K2 Export FBX Path", subtype='FILE_PATH', description="Path to export FBX model")
     bpy.types.Scene.k2_apply_modifiers = BoolProperty(name="Apply Modifiers", default=True, description="Apply modifiers on export")
     bpy.types.Scene.k2_frame_start = IntProperty(name="Start Frame", default=0, description="Start frame for exporting clip")
     bpy.types.Scene.k2_frame_end = IntProperty(name="End Frame", default=250, description="End frame for exporting clip")
@@ -172,10 +210,12 @@ def unregister():
     bpy.utils.unregister_class(K2_OT_Export)
     bpy.utils.unregister_class(K2_OT_ImportClip)
     bpy.utils.unregister_class(K2_OT_ExportClip)
+    bpy.utils.unregister_class(K2_OT_ExportFBX)
     del bpy.types.Scene.k2_import_path
     del bpy.types.Scene.k2_import_clip_path
     del bpy.types.Scene.k2_export_path
     del bpy.types.Scene.k2_export_clip_path
+    del bpy.types.Scene.k2_export_fbx_path
     del bpy.types.Scene.k2_apply_modifiers
     del bpy.types.Scene.k2_frame_start
     del bpy.types.Scene.k2_frame_end

@@ -2,6 +2,7 @@ import bpy
 import bmesh
 import struct
 import chunk
+import itertools
 from mathutils import Vector, Matrix, Euler
 import math
 from bpy.props import *
@@ -30,12 +31,44 @@ def read_int(honchunk):
 def read_float(honchunk):
     return struct.unpack("<f", honchunk.read(4))[0]
 
+def parse_links(honchunk, bone_names):
+    mesh_index = read_int(honchunk)
+    numverts = read_int(honchunk)
+    log("Parsing links")
+    vlog(f"Mesh index: {mesh_index}")
+    vlog(f"Number of vertices: {numverts}")
+
+    vgroups = {}
+    for i in range(numverts):
+        num_weights = read_int(honchunk)
+        if num_weights > 0:
+            weights = struct.unpack(f"<{num_weights}f", honchunk.read(num_weights * 4))
+            indexes = struct.unpack(f"<{num_weights}I", honchunk.read(num_weights * 4))
+        else:
+            weights = indexes = []
+
+        for ii, index in enumerate(indexes):
+            name = bone_names[index]
+            if name not in vgroups:
+                vgroups[name] = []
+            vgroups[name].append((i, weights[ii]))
+
+    honchunk.skip()
+    return vgroups
+
 def parse_vertices(honchunk):
     vlog('Parsing vertices chunk')
     numverts = int((honchunk.chunksize - 4) / 12)
     vlog(f'{numverts} vertices')
     meshindex = read_int(honchunk)
     return [struct.unpack("<3f", honchunk.read(12)) for _ in range(numverts)]
+
+def parse_sign(honchunk):
+    vlog('Parsing sign chunk')
+    numverts = honchunk.chunksize - 8
+    meshindex = read_int(honchunk)
+    vlog(read_int(honchunk))  # huh?
+    return [struct.unpack("<b", honchunk.read(1)) for _ in range(numverts)]
 
 def parse_faces(honchunk, version):
     vlog('Parsing faces chunk')
@@ -79,38 +112,6 @@ def parse_colr(honchunk):
     numverts = int((honchunk.chunksize - 4) / 4)
     meshindex = read_int(honchunk)
     return [struct.unpack("<4B", honchunk.read(4)) for _ in range(numverts)]
-
-def parse_links(honchunk, bone_names):
-    mesh_index = read_int(honchunk)
-    numverts = read_int(honchunk)
-    log("Parsing links")
-    vlog(f"Mesh index: {mesh_index}")
-    vlog(f"Number of vertices: {numverts}")
-
-    vgroups = {}
-    for i in range(numverts):
-        num_weights = read_int(honchunk)
-        if num_weights > 0:
-            weights = struct.unpack(f"<{num_weights}f", honchunk.read(num_weights * 4))
-            indexes = struct.unpack(f"<{num_weights}I", honchunk.read(num_weights * 4))
-        else:
-            weights = indexes = []
-
-        for ii, index in enumerate(indexes):
-            name = bone_names[index]
-            if name not in vgroups:
-                vgroups[name] = []
-            vgroups[name].append((i, weights[ii]))
-
-    honchunk.skip()
-    return vgroups
-
-def parse_sign(honchunk):
-    vlog('Parsing sign chunk')
-    numverts = honchunk.chunksize - 8
-    meshindex = read_int(honchunk)
-    vlog(read_int(honchunk))  # huh?
-    return [struct.unpack("<b", honchunk.read(1)) for _ in range(numverts)]
 
 def parse_surf(honchunk):
     vlog('Parsing surface chunk')
@@ -158,8 +159,6 @@ def mat3_to_vec_roll(mat):
     return vec, roll
 
 def create_blender_mesh(filename, objname, flipuv):
-    obj = None
-    rig = None
     try:
         with open(filename, 'rb') as file:
             sig = file.read(4)
@@ -209,6 +208,7 @@ def create_blender_mesh(filename, objname, flipuv):
             bone_names = []
             parents = []
             for i in range(num_bones):
+                name = ''
                 parent_bone_index = read_int(honchunk)
 
                 if version == 3:
@@ -221,7 +221,7 @@ def create_blender_mesh(filename, objname, flipuv):
                                      struct.unpack('<3f', honchunk.read(12)) + (0.0,),
                                      struct.unpack('<3f', honchunk.read(12)) + (1.0,)])
                     name_length = struct.unpack("B", honchunk.read(1))[0]
-                    name = honchunk.read(name_length).decode()
+                    name = honchunk.read(name_length)
                     honchunk.read(1)  # zero
                 elif version == 1:
                     pos = honchunk.tell() - 4
@@ -240,6 +240,7 @@ def create_blender_mesh(filename, objname, flipuv):
                                      struct.unpack('<4f', honchunk.read(16)),
                                      struct.unpack('<4f', honchunk.read(16))])
 
+                name = name.decode()
                 log(f"Bone name: {name}, parent {parent_bone_index}")
                 bone_names.append(name)
                 matrix.transpose()
@@ -248,7 +249,7 @@ def create_blender_mesh(filename, objname, flipuv):
                 axis, roll = mat3_to_vec_roll(matrix.to_3x3())
                 bone = armature_data.edit_bones.new(name)
                 bone.head = pos
-                bone.tail = pos + axis * 0.1  # Adjusted for better visibility
+                bone.tail = pos + axis
                 bone.roll = roll
                 parents.append(parent_bone_index)
                 bones.append(bone)
@@ -294,9 +295,9 @@ def create_blender_mesh(filename, objname, flipuv):
                         vlog(f"Bone link: {bone_link}")
                         sizename = struct.unpack('B', honchunk.read(1))[0]
                         sizemat = struct.unpack('B', honchunk.read(1))[0]
-                        meshname = honchunk.read(sizename).decode()
+                        meshname = honchunk.read(sizename)
                         honchunk.read(1)  # zero
-                        materialname = honchunk.read(sizemat).decode()
+                        materialname = honchunk.read(sizemat)
                     elif version == 1:
                         bone_link = -1
                         pos = honchunk.tell() - 4
@@ -314,6 +315,8 @@ def create_blender_mesh(filename, objname, flipuv):
 
                     honchunk.skip()
 
+                    meshname = meshname.decode()
+                    materialname = materialname.decode()
                     while True:
                         try:
                             honchunk = chunk.Chunk(file, bigendian=False, align=False)
@@ -427,8 +430,7 @@ def create_blender_mesh(filename, objname, flipuv):
         log(f"File IO Error: {e}")
     except Exception as e:
         log(f"Unexpected error: {e}")
-
-    return obj, rig  # Ensure obj and rig are defined before returning
+    return obj, rig  # Assuming you want to return the created objects
 
 def view_all_in_3d_view():
     for window in bpy.context.window_manager.windows:
@@ -448,6 +450,7 @@ def view_all_in_3d_view():
                             bpy.ops.view3d.view_all(center=False)
                         return True
     return False
+
 
 ##############################
 # CLIPS

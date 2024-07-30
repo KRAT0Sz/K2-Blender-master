@@ -72,12 +72,15 @@ def create_face_data(verts, faces, meshindex):
     data.write(struct.pack("<i", len(faces)))
     if len(verts) < 255:
         data.write(struct.pack("<B", 1))
-        str = '<3B'
+        fmt = '<3B'
     else:
         data.write(struct.pack("<B", 2))
-        str = '<3H'
+        fmt = '<3H'
     for f in faces:
-        data.write(struct.pack(str, *f))
+        if len(f) == 3:
+            data.write(struct.pack(fmt, *f))
+        else:
+            print(f"Warning: Face {f} is not a triangle and will be skipped")
     return data.getvalue()
 
 def create_tang_data(tang, meshindex):
@@ -147,25 +150,53 @@ def calcFaceSigns(ftexc):
             fsigns.append((-1, -1, -1))
     return fsigns
 
-def face_to_vertices_dup(faces, fdata, verts):
-    vdata = [None] * len(verts)
-    for fi, f in enumerate(faces):
-        for vi, v in enumerate(f):
-            if vdata[v] is None or vdata[v] == fdata[fi][vi]:
-                vdata[v] = fdata[fi][vi]
-            else:
-                newind = len(verts)
-                verts.append(verts[v])
-                faces[fi][vi] = newind
-                vdata.append(fdata[fi][vi])
-    return vdata
-
 def face_to_vertices(faces, fdata, verts):
     vdata = [None] * len(verts)
     for fi, f in enumerate(faces):
+        if fi >= len(fdata):
+            print(f"Error: fi ({fi}) out of range for fdata (length {len(fdata)})")
+            continue
+        
+        face_data = fdata[fi]
+        if len(f) != len(face_data):
+            print(f"Error: Mismatch in length of faces[{fi}] ({len(f)}) and fdata[{fi}] ({len(face_data)})")
+            continue
+        
         for vi, v in enumerate(f):
-            vdata[v] = fdata[fi][vi]
+            try:
+                vdata[v] = face_data[vi]
+            except IndexError as e:
+                print(f"Error: {e} | fi: {fi}, vi: {vi}, v: {v}, len(fdata): {len(fdata)}, len(fdata[{fi}]): {len(face_data)}")
+                raise e
     return vdata
+
+def face_to_vertices_dup(faces, fdata, verts):
+    vdata = [None] * len(verts)
+    for fi, f in enumerate(faces):
+        if fi >= len(fdata):
+            print(f"Error: fi ({fi}) out of range for fdata (length {len(fdata)})")
+            continue
+        
+        face_data = fdata[fi]
+        if len(f) != len(face_data):
+            print(f"Error: Mismatch in length of faces[{fi}] ({len(f)}) and fdata[{fi}] ({len(face_data)})")
+            continue
+        
+        for vi, v in enumerate(f):
+            try:
+                if vdata[v] is None or vdata[v] == face_data[vi]:
+                    vdata[v] = face_data[vi]
+                else:
+                    newind = len(verts)
+                    verts.append(verts[v])
+                    faces[fi][vi] = newind
+                    vdata.append(face_data[vi])
+            except IndexError as e:
+                print(f"Error: {e} | fi: {fi}, vi: {vi}, v: {v}, len(fdata): {len(fdata)}, len(fdata[{fi}]): {len(face_data)}")
+                raise e
+    return vdata
+
+
 
 def create_bone_data(armature, armMatrix, transform):
     bones = []
@@ -236,7 +267,7 @@ def select_armature():
 
 def export_k2_mesh(filename, applyMods):
     select_armature_and_mesh()
-    
+
     meshes = []
     armature = None
     for obj in bpy.context.selected_objects:
@@ -249,6 +280,7 @@ def export_k2_mesh(filename, applyMods):
                 me = obj.data
             bm = bmesh.new()
             bm.from_mesh(me)
+            bmesh.ops.triangulate(bm, faces=bm.faces[:])  # Ensure all faces are triangulated
             me = bm
             me.transform(matrix)
             meshes.append((obj, me))
@@ -269,15 +301,16 @@ def export_k2_mesh(filename, applyMods):
         headdata.write(struct.pack("<i", 0))
     headdata.write(struct.pack("<6f", *generate_bbox([x for _, x in meshes])))
     meshindex = 0
-    
+
     # Ensure directory exists
     os.makedirs(os.path.dirname(filename), exist_ok=True)
-    
+
     file = open(filename, 'wb')
     file.write(b'SMDL')
     write_block(file, 'head', headdata.getvalue())
-    write_block(file, 'bone', bonedata)
-    
+    if armature:
+        write_block(file, 'bone', bonedata)
+
     for obj, mesh in meshes:
         vert = [vert for vert in mesh.verts]
         faces = []
@@ -343,7 +376,7 @@ def export_k2_mesh(filename, applyMods):
             write_block(file, "nrml", create_nrml_data(vert, meshindex))
         if fcolr is not None:
             write_block(file, "colr", create_colr_data(colr, meshindex))
-        
+
         meshindex += 1
         vlog('total vertices duplicated: %d' % (len(vert) - len(mesh.verts)))
 

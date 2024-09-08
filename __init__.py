@@ -4,7 +4,7 @@ from bpy.props import StringProperty, BoolProperty, IntProperty, PointerProperty
 bl_info = {
     "name": "K2 Model/Animation Import-Export",
     "author": "Anton Romanov",
-    "version": (1, 0, 0),
+    "version": (1, 0, 1),
     "blender": (4, 0, 1),
     "location": "File > Import-Export > K2 model/clip",
     "description": "Import-Export meshes and animations used by K2 engine (Savage 2 and Heroes of Newerth games)",

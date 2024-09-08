@@ -34,9 +34,9 @@ Install
     - After importing or exporting models and clips, you will see a notification about the result at the bottom of the Blender window
     - If there are any errors, the notification will provide details about the errors
 
- encounter any issues, please let me know!
+
 
 <hr/>
 
-<h3 align="center">All errors have been fixed. Hoho, I think so, yeah.</h3>
+<h3 align="center"> encounter any issues, please let me know!.</h3>
 <br/>

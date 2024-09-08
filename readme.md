@@ -38,5 +38,5 @@ Install
 
 <hr/>
 
-<h3 align="center"> encounter any issues, please let me know!.</h3>
+<h3 align="center"> Encounter any issues, please let me know!.</h3>
 <br/>

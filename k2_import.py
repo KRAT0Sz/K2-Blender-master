@@ -1,35 +1,30 @@
+"""
+K2 engine model (.model) and animation clip (.clip) importer for Blender.
+Supports SMDL v1/v3 meshes and CLIP v1/v2+ animations.
+"""
+
 import bpy
-import bmesh
 import struct
 import chunk
-import itertools
-from mathutils import Vector, Matrix, Euler
 import math
-from bpy.props import *
+from mathutils import Vector, Matrix, Euler
 
-# Log level
-IMPORT_LOG_LEVEL = 3
+from .k2_common import (
+    log, vlog, dlog, err,
+    read_int, read_float,
+    bone_depth,
+    round_vector, round_matrix,
+    vec_roll_to_mat3, mat3_to_vec_roll,
+    view_all_in_3d_view,
+    MKEY_X, MKEY_Y, MKEY_Z,
+    MKEY_PITCH, MKEY_ROLL, MKEY_YAW,
+    MKEY_SCALE_X, MKEY_SCALE_Y, MKEY_SCALE_Z,
+    MKEY_VISIBILITY,
+)
 
-def log(msg):
-    if IMPORT_LOG_LEVEL >= 1:
-        print(msg)
-
-def vlog(msg):
-    if IMPORT_LOG_LEVEL >= 2:
-        print(msg)
-
-def dlog(msg):
-    if IMPORT_LOG_LEVEL >= 3:
-        print(msg)
-
-def err(msg):
-    log(f"ERROR: {msg}")
-
-def read_int(honchunk):
-    return struct.unpack("<i", honchunk.read(4))[0]
-
-def read_float(honchunk):
-    return struct.unpack("<f", honchunk.read(4))[0]
+# ============================================================================
+# Chunk parsers — each reads one chunk type from the binary stream
+# ============================================================================
 
 def parse_links(honchunk, bone_names):
     mesh_index = read_int(honchunk)
@@ -56,6 +51,7 @@ def parse_links(honchunk, bone_names):
     honchunk.skip()
     return vgroups
 
+
 def parse_vertices(honchunk):
     vlog('Parsing vertices chunk')
     numverts = int((honchunk.chunksize - 4) / 12)
@@ -63,12 +59,14 @@ def parse_vertices(honchunk):
     meshindex = read_int(honchunk)
     return [struct.unpack("<3f", honchunk.read(12)) for _ in range(numverts)]
 
+
 def parse_sign(honchunk):
     vlog('Parsing sign chunk')
     numverts = honchunk.chunksize - 8
     meshindex = read_int(honchunk)
-    vlog(read_int(honchunk))  # huh?
+    read_int(honchunk)  # padding / unknown field
     return [struct.unpack("<b", honchunk.read(1)) for _ in range(numverts)]
+
 
 def parse_faces(honchunk, version):
     vlog('Parsing faces chunk')
@@ -81,15 +79,14 @@ def parse_faces(honchunk, version):
     elif version == 1:
         size = 4
 
-    if size == 2:
-        return [struct.unpack("<3H", honchunk.read(6)) for _ in range(numfaces)]
-    elif size == 1:
-        return [struct.unpack("<3B", honchunk.read(3)) for _ in range(numfaces)]
-    elif size == 4:
-        return [struct.unpack("<3I", honchunk.read(12)) for _ in range(numfaces)]
-    else:
-        log(f"Unknown size for faces: {size}")
-        return []
+    fmt_map = {1: ("<3B", 3), 2: ("<3H", 6), 4: ("<3I", 12)}
+    if size in fmt_map:
+        fmt, nbytes = fmt_map[size]
+        return [struct.unpack(fmt, honchunk.read(nbytes)) for _ in range(numfaces)]
+
+    log(f"Unknown size for faces: {size}")
+    return []
+
 
 def parse_normals(honchunk):
     vlog('Parsing normals chunk')
@@ -98,20 +95,23 @@ def parse_normals(honchunk):
     meshindex = read_int(honchunk)
     return [struct.unpack("<3f", honchunk.read(12)) for _ in range(numverts)]
 
+
 def parse_texc(honchunk, version):
     vlog('Parsing UV texc chunk')
     numverts = int((honchunk.chunksize - 4) / 8)
     vlog(f'{numverts} texc')
     meshindex = read_int(honchunk)
     if version == 3:
-        vlog(read_int(honchunk))  # huh?
+        read_int(honchunk)  # unknown field
     return [struct.unpack("<2f", honchunk.read(8)) for _ in range(numverts)]
+
 
 def parse_colr(honchunk):
     vlog('Parsing vertex colors chunk')
     numverts = int((honchunk.chunksize - 4) / 4)
     meshindex = read_int(honchunk)
     return [struct.unpack("<4B", honchunk.read(4)) for _ in range(numverts)]
+
 
 def parse_surf(honchunk):
     vlog('Parsing surface chunk')
@@ -121,55 +121,252 @@ def parse_surf(honchunk):
     num_edges = read_int(honchunk)
     num_tris = read_int(honchunk)
 
-    # BMINf, BMAXf, FLAGSi
+    # BMIN(3f), BMAX(3f), FLAGS(i)
     honchunk.read(4 * 3 + 4 * 3 + 4)
     return (
         [struct.unpack("<4f", honchunk.read(4 * 4)) for _ in range(num_planes)],
         [struct.unpack("<3f", honchunk.read(4 * 3)) for _ in range(num_points)],
         [struct.unpack("<6f", honchunk.read(4 * 6)) for _ in range(num_edges)],
-        [struct.unpack("<3I", honchunk.read(4 * 3)) for _ in range(num_tris)]
+        [struct.unpack("<3I", honchunk.read(4 * 3)) for _ in range(num_tris)],
     )
 
-def round_vector(vec, dec=17):
-    return Vector([round(v, dec) for v in vec])
 
-def round_matrix(mat, dec=17):
-    return Matrix([round_vector(row, dec) for row in mat])
+# ============================================================================
+# Sub-chunk dispatcher — reads child chunks inside a mesh block
+# ============================================================================
 
-def vec_roll_to_mat3(vec, roll):
-    target = Vector((0, 1, 0))
-    nor = vec.normalized()
-    axis = target.cross(nor)
-    if axis.dot(axis) > 0.000001:
-        axis.normalize()
-        theta = target.angle(nor)
-        b_matrix = Matrix.Rotation(theta, 3, axis)
+def _read_mesh_subchunks(file, version, bone_names):
+    """Read all sub-chunks that follow a 'mesh' chunk until the next mesh/surf or EOF."""
+    verts = []
+    faces = []
+    signs = []
+    nrml = []
+    texc = []
+    colors = []
+    vgroups = {}
+    honchunk = None
+
+    while True:
+        try:
+            honchunk = chunk.Chunk(file, bigendian=False, align=False)
+        except EOFError:
+            vlog('Done reading chunks')
+            return verts, faces, signs, nrml, texc, colors, vgroups, None
+
+        name = honchunk.getname()
+        if name in (b'mesh', b'surf'):
+            return verts, faces, signs, nrml, texc, colors, vgroups, honchunk
+
+        if name == b'vrts':
+            verts = parse_vertices(honchunk)
+        elif name == b'face':
+            faces = parse_faces(honchunk, version)
+        elif name == b'nrml':
+            nrml = parse_normals(honchunk)
+        elif name == b'texc':
+            texc = parse_texc(honchunk, version)
+        elif name == b'colr':
+            colors = parse_colr(honchunk)
+        elif name in (b'lnk1', b'lnk3'):
+            vgroups = parse_links(honchunk, bone_names)
+        elif name == b'sign':
+            signs = parse_sign(honchunk)
+        elif name == b'tang':
+            honchunk.skip()
+        else:
+            vlog(f'Unknown chunk: {name}')
+            honchunk.skip()
+
+
+# ============================================================================
+# Bone reading
+# ============================================================================
+
+def _read_bone_v3(honchunk):
+    """Read a single bone entry in SMDL version 3 format."""
+    parent_index = read_int(honchunk)
+    inv_matrix = Matrix([struct.unpack('<3f', honchunk.read(12)) + (0.0,),
+                         struct.unpack('<3f', honchunk.read(12)) + (0.0,),
+                         struct.unpack('<3f', honchunk.read(12)) + (0.0,),
+                         struct.unpack('<3f', honchunk.read(12)) + (1.0,)])
+    matrix = Matrix([struct.unpack('<3f', honchunk.read(12)) + (0.0,),
+                     struct.unpack('<3f', honchunk.read(12)) + (0.0,),
+                     struct.unpack('<3f', honchunk.read(12)) + (0.0,),
+                     struct.unpack('<3f', honchunk.read(12)) + (1.0,)])
+    name_length = struct.unpack("B", honchunk.read(1))[0]
+    name = honchunk.read(name_length).decode()
+    honchunk.read(1)  # null terminator
+    return parent_index, name, matrix
+
+
+def _read_bone_v1(honchunk):
+    """Read a single bone entry in SMDL version 1 format."""
+    parent_index = read_int(honchunk)
+    pos = honchunk.tell() - 4
+    b = honchunk.read(1)
+    name = ''
+    while b != b'\0':
+        name += b.decode()
+        b = honchunk.read(1)
+    honchunk.seek(pos + 0x24)
+    inv_matrix = Matrix([struct.unpack('<4f', honchunk.read(16)),
+                         struct.unpack('<4f', honchunk.read(16)),
+                         struct.unpack('<4f', honchunk.read(16)),
+                         struct.unpack('<4f', honchunk.read(16))])
+    matrix = Matrix([struct.unpack('<4f', honchunk.read(16)),
+                     struct.unpack('<4f', honchunk.read(16)),
+                     struct.unpack('<4f', honchunk.read(16)),
+                     struct.unpack('<4f', honchunk.read(16))])
+    return parent_index, name, matrix
+
+
+def _read_bones(honchunk, num_bones, version, armature_data):
+    """Read all bones, create edit bones, and return bone_names + parent indices."""
+    bones = []
+    bone_names = []
+    parents = []
+
+    for _ in range(num_bones):
+        if version == 3:
+            parent_index, name, matrix = _read_bone_v3(honchunk)
+        elif version == 1:
+            parent_index, name, matrix = _read_bone_v1(honchunk)
+        else:
+            err(f"Unsupported version {version}")
+            return [], [], []
+
+        log(f"Bone name: {name}, parent {parent_index}")
+        bone_names.append(name)
+
+        matrix.transpose()
+        matrix = round_matrix(matrix, 4)
+        pos = matrix.translation
+        axis, roll = mat3_to_vec_roll(matrix.to_3x3())
+
+        bone = armature_data.edit_bones.new(name)
+        bone.head = pos
+        bone.tail = pos + axis
+        bone.roll = roll
+        parents.append(parent_index)
+        bones.append(bone)
+
+    for i in range(num_bones):
+        if parents[i] != -1:
+            bones[i].parent = bones[parents[i]]
+
+    honchunk.skip()
+    return bones, bone_names, parents
+
+
+# ============================================================================
+# Mesh header reading
+# ============================================================================
+
+def _read_mesh_header_v3(honchunk):
+    """Read mesh header fields for SMDL v3."""
+    mode = read_int(honchunk)
+    vlog(f"Mode: {mode}")
+    vlog(f"Vertices count: {read_int(honchunk)}")
+    vlog("Bounding box: (%f, %f, %f) - (%f, %f, %f)" % struct.unpack("<ffffff", honchunk.read(24)))
+    bone_link = read_int(honchunk)
+    vlog(f"Bone link: {bone_link}")
+    sizename = struct.unpack('B', honchunk.read(1))[0]
+    sizemat = struct.unpack('B', honchunk.read(1))[0]
+    meshname = honchunk.read(sizename).decode()
+    honchunk.read(1)  # null terminator
+    materialname = honchunk.read(sizemat).decode()
+    return mode, bone_link, meshname, materialname
+
+
+def _read_mesh_header_v1(honchunk):
+    """Read mesh header fields for SMDL v1."""
+    pos = honchunk.tell() - 4
+    b = honchunk.read(1)
+    meshname = ''
+    while b != b'\0':
+        meshname += b.decode()
+        b = honchunk.read(1)
+    honchunk.seek(pos + 0x24)
+    b = honchunk.read(1)
+    materialname = ''
+    while b != b'\0':
+        materialname += b.decode()
+        b = honchunk.read(1)
+    return 1, -1, meshname, materialname
+
+
+# ============================================================================
+# Blender object builders
+# ============================================================================
+
+def _build_mesh_object(scn, meshname, materialname, verts, faces, texc, flipuv,
+                       vgroups, bone_link, bone_names, rig, is_surf):
+    """Create a Blender mesh object with UVs, vertex groups, and armature modifier."""
+    msh = bpy.data.meshes.new(name=meshname)
+    msh.from_pydata(verts, [], faces)
+    msh.update()
+
+    if materialname:
+        msh.materials.append(bpy.data.materials.new(materialname))
+
+    if texc:
+        if flipuv:
+            texc = [(uv[0], 1 - uv[1]) for uv in texc]
+        uv_layer = msh.uv_layers.new(name=f'UVMain{meshname}')
+        for face in msh.polygons:
+            for vert_idx, loop_idx in zip(face.vertices, face.loop_indices):
+                uv_layer.data[loop_idx].uv = texc[vert_idx]
+
+    obj = bpy.data.objects.new(f'{meshname}_Object', msh)
+    scn.collection.objects.link(obj)
+    bpy.context.view_layer.objects.active = obj
+    bpy.context.view_layer.update()
+
+    if is_surf:
+        obj.display_type = 'WIRE'
     else:
-        updown = 1 if target.dot(nor) > 0 else -1
-        b_matrix = Matrix.Scale(updown, 3)
-    r_matrix = Matrix.Rotation(roll, 3, nor)
-    return r_matrix @ b_matrix
+        if bone_link >= 0 and bone_link < len(bone_names):
+            grp = obj.vertex_groups.new(name=bone_names[bone_link])
+            grp.add(list(range(len(msh.vertices))), 1.0, 'REPLACE')
+        for name, vg in vgroups.items():
+            grp = obj.vertex_groups.new(name=name)
+            for v, w in vg:
+                grp.add([v], w, 'REPLACE')
 
-def mat3_to_vec_roll(mat):
-    vec = mat.col[1]
-    vecmat = vec_roll_to_mat3(mat.col[1], 0)
-    vecmatinv = vecmat.inverted()
-    rollmat = vecmatinv @ mat
-    roll = math.atan2(rollmat[0][2], rollmat[2][2])
-    return vec, roll
+        mod = obj.modifiers.new(name='K2_Armature', type='ARMATURE')
+        mod.object = rig
+        mod.use_bone_envelopes = False
+        mod.use_vertex_groups = True
+
+        bpy.context.view_layer.objects.active = rig
+        rig.select_set(True)
+        bpy.ops.object.mode_set(mode='POSE')
+        for b in rig.pose.bones:
+            b.rotation_mode = 'QUATERNION'
+        bpy.ops.object.mode_set(mode='OBJECT')
+        rig.select_set(False)
+
+    bpy.context.view_layer.objects.active = None
+    return obj
+
+
+# ============================================================================
+# Main mesh import
+# ============================================================================
 
 def create_blender_mesh(filename, objname, flipuv):
+    """Import a K2 .model file into Blender."""
     try:
         with open(filename, 'rb') as file:
             sig = file.read(4)
             if sig != b'SMDL':
                 err('Unknown file signature')
-                return
+                return None, None
 
             honchunk = chunk.Chunk(file, bigendian=False, align=False)
             if honchunk.getname() != b'head':
-                log('File does not start with head chunk!')
-                return
+                err('File does not start with head chunk')
+                return None, None
 
             version = read_int(honchunk)
             num_meshes = read_int(honchunk)
@@ -187,13 +384,13 @@ def create_blender_mesh(filename, objname, flipuv):
 
             scn = bpy.context.scene
 
+            # --- Read bones ---
             try:
                 honchunk = chunk.Chunk(file, bigendian=False, align=False)
             except EOFError:
-                log('Error reading bone chunk')
-                return
+                err('Error reading bone chunk')
+                return None, None
 
-            # Read bones
             armature_data = bpy.data.armatures.new(f'{objname}_Armature')
             armature_data.display_type = 'STICK'
             armature_data.show_names = True
@@ -203,308 +400,132 @@ def create_blender_mesh(filename, objname, flipuv):
             rig.select_set(True)
 
             bpy.ops.object.mode_set(mode='EDIT')
-
-            bones = []
-            bone_names = []
-            parents = []
-            for i in range(num_bones):
-                name = ''
-                parent_bone_index = read_int(honchunk)
-
-                if version == 3:
-                    inv_matrix = Matrix([struct.unpack('<3f', honchunk.read(12)) + (0.0,),
-                                         struct.unpack('<3f', honchunk.read(12)) + (0.0,),
-                                         struct.unpack('<3f', honchunk.read(12)) + (0.0,),
-                                         struct.unpack('<3f', honchunk.read(12)) + (1.0,)])
-                    matrix = Matrix([struct.unpack('<3f', honchunk.read(12)) + (0.0,),
-                                     struct.unpack('<3f', honchunk.read(12)) + (0.0,),
-                                     struct.unpack('<3f', honchunk.read(12)) + (0.0,),
-                                     struct.unpack('<3f', honchunk.read(12)) + (1.0,)])
-                    name_length = struct.unpack("B", honchunk.read(1))[0]
-                    name = honchunk.read(name_length)
-                    honchunk.read(1)  # zero
-                elif version == 1:
-                    pos = honchunk.tell() - 4
-                    b = honchunk.read(1)
-                    name = ''
-                    while b != b'\0':
-                        name += b.decode()
-                        b = honchunk.read(1)
-                    honchunk.seek(pos + 0x24)
-                    inv_matrix = Matrix([struct.unpack('<4f', honchunk.read(16)),
-                                         struct.unpack('<4f', honchunk.read(16)),
-                                         struct.unpack('<4f', honchunk.read(16)),
-                                         struct.unpack('<4f', honchunk.read(16))])
-                    matrix = Matrix([struct.unpack('<4f', honchunk.read(16)),
-                                     struct.unpack('<4f', honchunk.read(16)),
-                                     struct.unpack('<4f', honchunk.read(16)),
-                                     struct.unpack('<4f', honchunk.read(16))])
-
-                name = name.decode()
-                log(f"Bone name: {name}, parent {parent_bone_index}")
-                bone_names.append(name)
-                matrix.transpose()
-                matrix = round_matrix(matrix, 4)
-                pos = matrix.translation
-                axis, roll = mat3_to_vec_roll(matrix.to_3x3())
-                bone = armature_data.edit_bones.new(name)
-                bone.head = pos
-                bone.tail = pos + axis
-                bone.roll = roll
-                parents.append(parent_bone_index)
-                bones.append(bone)
-
-            for i in range(num_bones):
-                if parents[i] != -1:
-                    bones[i].parent = bones[parents[i]]
-
-            honchunk.skip()
-
+            _, bone_names, _ = _read_bones(honchunk, num_bones, version, armature_data)
             bpy.ops.object.mode_set(mode='OBJECT')
+
             rig.show_in_front = True
             bpy.context.view_layer.update()
 
+            # --- Read meshes / surfs ---
             try:
                 honchunk = chunk.Chunk(file, bigendian=False, align=False)
             except EOFError:
-                log('Error reading mesh chunk')
-                return
+                err('Error reading mesh chunk')
+                return None, rig
 
-            while honchunk and honchunk.getname() in [b'mesh', b'surf']:
-                verts = []
-                faces = []
-                signs = []
-                nrml = []
-                texc = []
-                colors = []
-                surf_planes = []
-                surf_points = []
-                surf_edges = []
-                surf_tris = []
-
+            obj = None
+            while honchunk and honchunk.getname() in (b'mesh', b'surf'):
                 if honchunk.getname() == b'mesh':
-                    surf = False
                     vlog(f"Mesh index: {read_int(honchunk)}")
-                    mode = 1
+
                     if version == 3:
-                        mode = read_int(honchunk)
-                        vlog(f"Mode: {mode}")
-                        vlog(f"Vertices count: {read_int(honchunk)}")
-                        vlog("Bounding box: (%f, %f, %f) - (%f, %f, %f)" % struct.unpack("<ffffff", honchunk.read(24)))
-                        bone_link = read_int(honchunk)
-                        vlog(f"Bone link: {bone_link}")
-                        sizename = struct.unpack('B', honchunk.read(1))[0]
-                        sizemat = struct.unpack('B', honchunk.read(1))[0]
-                        meshname = honchunk.read(sizename)
-                        honchunk.read(1)  # zero
-                        materialname = honchunk.read(sizemat)
+                        mode, bone_link, meshname, materialname = _read_mesh_header_v3(honchunk)
                     elif version == 1:
-                        bone_link = -1
-                        pos = honchunk.tell() - 4
-                        b = honchunk.read(1)
-                        meshname = ''
-                        while b != b'\0':
-                            meshname += b.decode()
-                            b = honchunk.read(1)
-                        honchunk.seek(pos + 0x24)
-                        b = honchunk.read(1)
-                        materialname = ''
-                        while b != b'\0':
-                            materialname += b.decode()
-                            b = honchunk.read(1)
+                        mode, bone_link, meshname, materialname = _read_mesh_header_v1(honchunk)
+                    else:
+                        err(f"Unsupported version {version}")
+                        return obj, rig
 
                     honchunk.skip()
 
-                    meshname = meshname.decode()
-                    materialname = materialname.decode()
-                    while True:
-                        try:
-                            honchunk = chunk.Chunk(file, bigendian=False, align=False)
-                        except EOFError:
-                            vlog('Done reading chunks')
-                            honchunk = None
-                            break
-                        if honchunk.getname() in [b'mesh', b'surf']:
-                            break
-                        elif mode != 1:
+                    if mode != 1:
+                        # Skip non-standard mesh modes entirely
+                        while True:
+                            try:
+                                honchunk = chunk.Chunk(file, bigendian=False, align=False)
+                            except EOFError:
+                                honchunk = None
+                                break
+                            if honchunk.getname() in (b'mesh', b'surf'):
+                                break
                             honchunk.skip()
-                        else:
-                            if honchunk.getname() == b'vrts':
-                                verts = parse_vertices(honchunk)
-                            elif honchunk.getname() == b'face':
-                                faces = parse_faces(honchunk, version)
-                            elif honchunk.getname() == b'nrml':
-                                nrml = parse_normals(honchunk)
-                            elif honchunk.getname() == b'texc':
-                                texc = parse_texc(honchunk, version)
-                            elif honchunk.getname() == b'colr':
-                                colors = parse_colr(honchunk)
-                            elif honchunk.getname() in [b'lnk1', b'lnk3']:
-                                vgroups = parse_links(honchunk, bone_names)
-                            elif honchunk.getname() == b'sign':
-                                signs = parse_sign(honchunk)
-                            elif honchunk.getname == b'tang':
-                                honchunk.skip()
-                            else:
-                                vlog(f'Unknown chunk: {honchunk.getname()}')
-                                honchunk.skip()
+                        continue
+
+                    verts, faces, signs, nrml, texc, colors, vgroups, honchunk = \
+                        _read_mesh_subchunks(file, version, bone_names)
+
+                    obj = _build_mesh_object(
+                        scn, meshname, materialname, verts, faces, texc, flipuv,
+                        vgroups, bone_link, bone_names, rig, is_surf=False,
+                    )
+
                 elif honchunk.getname() == b'surf':
                     surf_planes, surf_points, surf_edges, surf_tris = parse_surf(honchunk)
-                    print(surf_planes)
-                    print(surf_points)
-                    print(surf_edges)
-                    print(surf_tris)
-                    verts = surf_points
-                    faces = surf_tris
-                    surf = True
-                    meshname = f'{objname}_surf'
+                    dlog(f"Surface: {len(surf_planes)} planes, {len(surf_points)} points, "
+                         f"{len(surf_edges)} edges, {len(surf_tris)} tris")
+
                     honchunk.skip()
-                    mode = 1
+
+                    obj = _build_mesh_object(
+                        scn, f'{objname}_surf', None, surf_points, surf_tris, [], flipuv,
+                        {}, -1, bone_names, rig, is_surf=True,
+                    )
+
                     try:
                         honchunk = chunk.Chunk(file, bigendian=False, align=False)
                     except EOFError:
                         vlog('Done reading chunks')
                         honchunk = None
 
-                if mode != 1:
-                    continue
-
-                msh = bpy.data.meshes.new(name=meshname)
-                msh.from_pydata(verts, [], faces)
-                msh.update()
-
-                if materialname is not None:
-                    msh.materials.append(bpy.data.materials.new(materialname))
-
-                if len(texc) > 0:
-                    if flipuv:
-                        texc = [(uv[0], 1 - uv[1]) for uv in texc]
-
-                    # Generate texCoords for faces
-                    texcoords = [texc[vert_id] for face in faces for vert_id in face]
-
-                    # Create a UV map
-                    uv_layer = msh.uv_layers.new(name=f'UVMain{meshname}')
-                    for face in msh.polygons:
-                        for vert_idx, loop_idx in zip(face.vertices, face.loop_indices):
-                            uv_layer.data[loop_idx].uv = texc[vert_idx]
-
-                obj = bpy.data.objects.new(f'{meshname}_Object', msh)
-                # Link object to scene
-                scn.collection.objects.link(obj)
-                bpy.context.view_layer.objects.active = obj
-                bpy.context.view_layer.update()
-
-                if surf or mode != 1:
-                    obj.display_type = 'WIRE'
-                else:
-                    # Vertex groups
-                    if bone_link >= 0:
-                        grp = obj.vertex_groups.new(name=bone_names[bone_link])
-                        grp.add(list(range(len(msh.vertices))), 1.0, 'REPLACE')
-                    for name, vg in vgroups.items():
-                        grp = obj.vertex_groups.new(name=name)
-                        for v, w in vg:
-                            grp.add([v], w, 'REPLACE')
-
-                    mod = obj.modifiers.new(name='MyRigModif', type='ARMATURE')
-                    mod.object = rig
-                    mod.use_bone_envelopes = False
-                    mod.use_vertex_groups = True
-
-                    bpy.context.view_layer.objects.active = rig
-                    rig.select_set(True)
-                    bpy.ops.object.mode_set(mode='POSE')
-                    pose = rig.pose
-                    for b in pose.bones:
-                        b.rotation_mode = 'QUATERNION'
-                    bpy.ops.object.mode_set(mode='OBJECT')
-                    rig.select_set(False)
-                bpy.context.view_layer.objects.active = None
-
             bpy.context.view_layer.update()
-
             view_all_in_3d_view()
+            return obj, rig
 
     except IOError as e:
-        log(f"File IO Error: {e}")
+        err(f"File IO Error: {e}")
     except Exception as e:
-        log(f"Unexpected error: {e}")
-    return obj, rig  # Assuming you want to return the created objects
-
-def view_all_in_3d_view():
-    for window in bpy.context.window_manager.windows:
-        screen = window.screen
-        for area in screen.areas:
-            if area.type == 'VIEW_3D':
-                for region in area.regions:
-                    if region.type == 'WINDOW':
-                        override = {
-                            'window': window,
-                            'screen': screen,
-                            'area': area,
-                            'region': region,
-                            'scene': bpy.context.scene,
-                        }
-                        with bpy.context.temp_override(**override):
-                            bpy.ops.view3d.view_all(center=False)
-                        return True
-    return False
+        err(f"Unexpected error: {e}")
+    return None, None
 
 
-##############################
-# CLIPS
-##############################
+# ============================================================================
+# Clip helpers
+# ============================================================================
 
-MKEY_X, MKEY_Y, MKEY_Z, MKEY_PITCH, MKEY_ROLL, MKEY_YAW, MKEY_VISIBILITY, MKEY_SCALE_X, MKEY_SCALE_Y, MKEY_SCALE_Z = range(10)
+def _get_motion_value(motion_keys, frame_index):
+    """Safely get a motion key value, clamping to the last available frame."""
+    if frame_index < len(motion_keys):
+        return motion_keys[frame_index]
+    return motion_keys[-1]
 
-def bone_depth(bone):
-    if not bone.parent:
-        return 0
-    else:
-        return 1 + bone_depth(bone.parent)
 
-def get_transform_matrix(motions, bone, i, version):
+def get_transform_matrix(motions, bone, frame, version):
     motion = motions[bone.name]
-    # Translation
-    x = motion[MKEY_X][i] if i < len(motion[MKEY_X]) else motion[MKEY_X][-1]
-    y = motion[MKEY_Y][i] if i < len(motion[MKEY_Y]) else motion[MKEY_Y][-1]
-    z = motion[MKEY_Z][i] if i < len(motion[MKEY_Z]) else motion[MKEY_Z][-1]
+    x = _get_motion_value(motion[MKEY_X], frame)
+    y = _get_motion_value(motion[MKEY_Y], frame)
+    z = _get_motion_value(motion[MKEY_Z], frame)
 
-    # Rotation
-    rx = motion[MKEY_PITCH][i] if i < len(motion[MKEY_PITCH]) else motion[MKEY_PITCH][-1]
-    ry = motion[MKEY_ROLL][i] if i < len(motion[MKEY_ROLL]) else motion[MKEY_ROLL][-1]
-    rz = motion[MKEY_YAW][i] if i < len(motion[MKEY_YAW]) else motion[MKEY_YAW][-1]
+    rx = _get_motion_value(motion[MKEY_PITCH], frame)
+    ry = _get_motion_value(motion[MKEY_ROLL], frame)
+    rz = _get_motion_value(motion[MKEY_YAW], frame)
 
-    # Scaling
+    sx = _get_motion_value(motion[MKEY_SCALE_X], frame)
     if version == 1:
-        sx = motion[MKEY_SCALE_X][i] if i < len(motion[MKEY_SCALE_X]) else motion[MKEY_SCALE_X][-1]
         sy = sz = sx
     else:
-        sx = motion[MKEY_SCALE_X][i] if i < len(motion[MKEY_SCALE_X]) else motion[MKEY_SCALE_X][-1]
-        sy = motion[MKEY_SCALE_Y][i] if i < len(motion[MKEY_SCALE_Y]) else motion[MKEY_SCALE_Y][-1]
-        sz = motion[MKEY_SCALE_Z][i] if i < len(motion[MKEY_SCALE_Z]) else motion[MKEY_SCALE_Z][-1]
+        sy = _get_motion_value(motion[MKEY_SCALE_Y], frame)
+        sz = _get_motion_value(motion[MKEY_SCALE_Z], frame)
 
-    scale = Vector([sx, sy, sz])
-    bone_rotation_matrix = Euler((math.radians(rx), math.radians(ry), math.radians(rz)), 'YXZ').to_matrix().to_4x4()
-    bone_rotation_matrix = Matrix.Translation(Vector((x, y, z))) @ bone_rotation_matrix
+    rotation_matrix = Euler(
+        (math.radians(rx), math.radians(ry), math.radians(rz)), 'YXZ'
+    ).to_matrix().to_4x4()
+    transform = Matrix.Translation(Vector((x, y, z))) @ rotation_matrix
 
-    return bone_rotation_matrix, scale
+    return transform, Vector((sx, sy, sz))
+
 
 def animate_bone(name, pose, motions, num_frames, armature, arm_ob, version):
     if name not in armature.bones.keys():
         log(f'{name} not found in armature')
         return
 
-    motion = motions[name]
     bone = armature.bones[name]
     bone_rest_matrix = Matrix(bone.matrix_local)
 
     if bone.parent is not None:
-        parent_bone = bone.parent
-        parent_rest_bone_matrix = Matrix(parent_bone.matrix_local)
-        parent_rest_bone_matrix.invert()
-        bone_rest_matrix = parent_rest_bone_matrix @ bone_rest_matrix
+        parent_rest_inv = Matrix(bone.parent.matrix_local)
+        parent_rest_inv.invert()
+        bone_rest_matrix = parent_rest_inv @ bone_rest_matrix
 
     bone_rest_matrix_inv = Matrix(bone_rest_matrix).inverted()
 
@@ -517,7 +538,13 @@ def animate_bone(name, pose, motions, num_frames, armature, arm_ob, version):
         pbone.keyframe_insert(data_path='rotation_quaternion', frame=i)
         pbone.keyframe_insert(data_path='location', frame=i)
 
+
+# ============================================================================
+# Main clip import
+# ============================================================================
+
 def create_blender_clip(filename, clipname):
+    """Import a K2 .clip file and apply it to the selected armature."""
     try:
         with open(filename, 'rb') as file:
             sig = file.read(4)
@@ -566,7 +593,7 @@ def create_blender_clip(filename, clipname):
 
                 if name not in motions:
                     motions[name] = {}
-                dlog(f"{name}, bone index: {boneindex}, key type: {keytype}, number of keys: {numkeys}")
+                dlog(f"{name}, bone index: {boneindex}, key type: {keytype}, keys: {numkeys}")
                 if keytype == MKEY_VISIBILITY:
                     data = struct.unpack(f"{numkeys}B", clipchunk.read(numkeys))
                 else:
@@ -574,16 +601,21 @@ def create_blender_clip(filename, clipname):
                 motions[name][keytype] = list(data)
                 clipchunk.skip()
 
-            # File read, now animate
             for bone_name in motions:
                 animate_bone(bone_name, pose, motions, num_frames, armature, arm_ob, version)
 
     except IOError as e:
-        log(f"File IO Error: {e}")
+        err(f"File IO Error: {e}")
+
+
+# ============================================================================
+# Public entry points (called from __init__.py operators)
+# ============================================================================
 
 def readclip(filepath):
     obj_name = bpy.path.display_name_from_filepath(filepath)
     create_blender_clip(filepath, obj_name)
+
 
 def read(filepath, flipuv):
     obj_name = bpy.path.display_name_from_filepath(filepath)

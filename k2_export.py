@@ -1,3 +1,8 @@
+"""
+K2 engine model (.model) and animation clip (.clip) exporter for Blender.
+Writes SMDL v3 meshes and CLIP v2 animations.
+"""
+
 import bpy
 import bmesh
 from io import BytesIO
@@ -6,455 +11,389 @@ import os
 from math import degrees
 from mathutils import Matrix
 
-# Determines the verbosity of logging.
-IMPORT_LOG_LEVEL = 0
+from .k2_common import (
+    log, vlog, dlog, err,
+    bone_depth,
+    MKEY_X, MKEY_Y, MKEY_Z,
+    MKEY_PITCH, MKEY_ROLL, MKEY_YAW,
+    MKEY_VISIBILITY,
+    MKEY_SCALE_X, MKEY_SCALE_Y, MKEY_SCALE_Z,
+    MKEY_COUNT,
+)
 
-# Keyframe types
-MKEY_X, MKEY_Y, MKEY_Z, MKEY_PITCH, MKEY_ROLL, MKEY_YAW, MKEY_VISIBILITY, MKEY_SCALE_X, MKEY_SCALE_Y, MKEY_SCALE_Z, MKEY_COUNT = range(11)
-
-def log(msg):
-    if IMPORT_LOG_LEVEL >= 1:
-        print(msg)
-
-def vlog(msg):
-    if IMPORT_LOG_LEVEL >= 2:
-        print(msg)
-
-def dlog(msg):
-    if IMPORT_LOG_LEVEL >= 3:
-        print(msg)
-
-def err(msg):
-    log(msg)
-
-def bone_depth(bone):
-    if not bone.parent:
-        return 0
-    else:
-        return 1 + bone_depth(bone.parent)
-
-def generate_bbox(meshes):
-    xx = []
-    yy = []
-    zz = []
-    for mesh in meshes:
-        nv = [v.co for v in mesh.verts]
-        xx += [co[0] for co in nv]
-        yy += [co[1] for co in nv]
-        zz += [co[2] for co in nv]
-    return [min(xx), min(yy), min(zz), max(xx), max(yy), max(zz)]
-
-def create_mesh_data(mesh, vert, index, name, mname):
-    meshdata = BytesIO()
-    meshdata.write(struct.pack("<i", index))
-    meshdata.write(struct.pack("<i", 1)) # mode? huh? dunno...
-    meshdata.write(struct.pack("<i", len(vert))) # vertices count
-    meshdata.write(struct.pack("<6f", *generate_bbox([mesh]))) # bounding box
-    meshdata.write(struct.pack("<i", -1)) # bone link... dunno... TODO
-    meshdata.write(struct.pack("<B", len(name))) 
-    meshdata.write(struct.pack("<B", len(mname))) 
-    meshdata.write(name)
-    meshdata.write(struct.pack("<B", 0)) 
-    meshdata.write(mname)
-    meshdata.write(struct.pack("<B", 0)) 
-    return meshdata.getvalue()
-
-def create_vrts_data(verts, meshindex):
-    data = BytesIO()
-    data.write(struct.pack("<i", meshindex))
-    for v in verts:
-        data.write(struct.pack("<3f", *v.co))
-    return data.getvalue()
-
-def create_face_data(verts, faces, meshindex):
-    data = BytesIO()
-    data.write(struct.pack("<i", meshindex))
-    data.write(struct.pack("<i", len(faces)))
-    if len(verts) < 255:
-        data.write(struct.pack("<B", 1))
-        fmt = '<3B'
-    else:
-        data.write(struct.pack("<B", 2))
-        fmt = '<3H'
-    for f in faces:
-        if len(f) == 3:
-            data.write(struct.pack(fmt, *f))
-        else:
-            print(f"Warning: Face {f} is not a triangle and will be skipped")
-    return data.getvalue()
-
-def create_tang_data(tang, meshindex):
-    data = BytesIO()
-    data.write(struct.pack("<i", meshindex))
-    data.write(struct.pack("<i", 0)) # huh?
-    for t in tang:
-        data.write(struct.pack('<3f', *list(t)))
-    return data.getvalue()
+# ============================================================================
+# Binary writing helpers
+# ============================================================================
 
 def write_block(file, name, data):
     file.write(name.encode('utf8')[:4])
     file.write(struct.pack("<i", len(data)))
     file.write(data)
 
+
+# ============================================================================
+# Bounding box
+# ============================================================================
+
+def generate_bbox(meshes):
+    xx, yy, zz = [], [], []
+    for mesh in meshes:
+        for v in mesh.verts:
+            xx.append(v.co[0])
+            yy.append(v.co[1])
+            zz.append(v.co[2])
+    return [min(xx), min(yy), min(zz), max(xx), max(yy), max(zz)]
+
+
+# ============================================================================
+# Chunk data builders
+# ============================================================================
+
+def create_mesh_data(mesh, vert, index, name, mname):
+    buf = BytesIO()
+    buf.write(struct.pack("<i", index))
+    buf.write(struct.pack("<i", 1))  # mode
+    buf.write(struct.pack("<i", len(vert)))
+    buf.write(struct.pack("<6f", *generate_bbox([mesh])))
+    buf.write(struct.pack("<i", -1))  # bone link (TODO: proper value)
+    buf.write(struct.pack("<B", len(name)))
+    buf.write(struct.pack("<B", len(mname)))
+    buf.write(name)
+    buf.write(struct.pack("<B", 0))
+    buf.write(mname)
+    buf.write(struct.pack("<B", 0))
+    return buf.getvalue()
+
+
+def create_vrts_data(verts, meshindex):
+    buf = BytesIO()
+    buf.write(struct.pack("<i", meshindex))
+    for v in verts:
+        buf.write(struct.pack("<3f", *v.co))
+    return buf.getvalue()
+
+
+def create_face_data(verts, faces, meshindex):
+    buf = BytesIO()
+    buf.write(struct.pack("<i", meshindex))
+    buf.write(struct.pack("<i", len(faces)))
+    if len(verts) < 255:
+        buf.write(struct.pack("<B", 1))
+        fmt = '<3B'
+    else:
+        buf.write(struct.pack("<B", 2))
+        fmt = '<3H'
+    for f in faces:
+        if len(f) == 3:
+            buf.write(struct.pack(fmt, *f))
+        else:
+            log(f"Warning: Face {f} is not a triangle and will be skipped")
+    return buf.getvalue()
+
+
+def create_tang_data(tang, meshindex):
+    buf = BytesIO()
+    buf.write(struct.pack("<i", meshindex))
+    buf.write(struct.pack("<i", 0))
+    for t in tang:
+        buf.write(struct.pack('<3f', *list(t)))
+    return buf.getvalue()
+
+
 def create_texc_data(texc, meshindex):
-    for i in range(len(texc)):
-        texc[i] = [texc[i][0], 1.0 - texc[i][1]]
-    data = BytesIO()
-    data.write(struct.pack("<i", meshindex))
-    data.write(struct.pack("<i", 0)) # huh?
+    buf = BytesIO()
+    buf.write(struct.pack("<i", meshindex))
+    buf.write(struct.pack("<i", 0))
     for t in texc:
-        data.write(struct.pack("<2f", *t))
-    return data.getvalue()
+        buf.write(struct.pack("<2f", t[0], 1.0 - t[1]))
+    return buf.getvalue()
+
 
 def create_colr_data(colr, meshindex):
-    data = BytesIO()
-    data.write(struct.pack("<i", meshindex))
+    buf = BytesIO()
+    buf.write(struct.pack("<i", meshindex))
     for c in colr:
-        data.write(struct.pack("<4B", c.r, c.g, c.b, c.a))
-    return data.getvalue()
+        buf.write(struct.pack("<4B", c.r, c.g, c.b, c.a))
+    return buf.getvalue()
+
 
 def create_nrml_data(verts, meshindex):
-    data = BytesIO()
-    data.write(struct.pack("<i", meshindex))
+    buf = BytesIO()
+    buf.write(struct.pack("<i", meshindex))
     for v in verts:
-        data.write(struct.pack("<3f", *v.normal))
-    return data.getvalue()
+        buf.write(struct.pack("<3f", *v.normal))
+    return buf.getvalue()
+
 
 def create_lnk1_data(lnk1, meshindex, bone_indices):
-    data = BytesIO()
-    data.write(struct.pack("<i", meshindex))
-    data.write(struct.pack("<i", len(lnk1)))
+    buf = BytesIO()
+    buf.write(struct.pack("<i", meshindex))
+    buf.write(struct.pack("<i", len(lnk1)))
     for influences in lnk1:
         influences = [inf for inf in influences if inf[0] in bone_indices]
-        l = len(influences)
-        data.write(struct.pack("<i", l))
-        if l > 0:
-            data.write(struct.pack('<%df' % l, *[inf[1] for inf in influences]))
-            data.write(struct.pack('<%dI' % l, *[bone_indices[inf[0]] for inf in influences]))
-    return data.getvalue()
+        count = len(influences)
+        buf.write(struct.pack("<i", count))
+        if count > 0:
+            buf.write(struct.pack(f'<{count}f', *[inf[1] for inf in influences]))
+            buf.write(struct.pack(f'<{count}I', *[bone_indices[inf[0]] for inf in influences]))
+    return buf.getvalue()
+
 
 def create_sign_data(meshindex, sign):
-    data = BytesIO()
-    data.write(struct.pack("<i", meshindex))
-    data.write(struct.pack("<i", 0))
+    buf = BytesIO()
+    buf.write(struct.pack("<i", meshindex))
+    buf.write(struct.pack("<i", 0))
     for s in sign:
-        data.write(struct.pack("<b", s))
-    return data.getvalue()
+        buf.write(struct.pack("<b", s))
+    return buf.getvalue()
 
-def calcFaceSigns(ftexc):
+
+# ============================================================================
+# Face / vertex data conversion
+# ============================================================================
+
+def calc_face_signs(ftexc):
     fsigns = []
     for uv in ftexc:
-        if ((uv[1][0] - uv[0][0]) * (uv[2][1] - uv[1][1]) - (uv[1][1] - uv[0][1]) * (uv[2][0] - uv[1][0])) > 0:
+        cross = ((uv[1][0] - uv[0][0]) * (uv[2][1] - uv[1][1])
+                 - (uv[1][1] - uv[0][1]) * (uv[2][0] - uv[1][0]))
+        if cross > 0:
             fsigns.append((0, 0, 0))
         else:
             fsigns.append((-1, -1, -1))
     return fsigns
 
+
 def face_to_vertices(faces, fdata, verts):
+    """Map per-face data to per-vertex data. First-write wins for shared vertices."""
     vdata = [None] * len(verts)
     for fi, f in enumerate(faces):
         if fi >= len(fdata):
-            print(f"Error: fi ({fi}) out of range for fdata (length {len(fdata)})")
+            log(f"face_to_vertices: face index {fi} out of range (fdata length {len(fdata)})")
             continue
-        
         face_data = fdata[fi]
         if len(f) != len(face_data):
-            print(f"Error: Mismatch in length of faces[{fi}] ({len(f)}) and fdata[{fi}] ({len(face_data)})")
+            log(f"face_to_vertices: mismatch at face {fi} — {len(f)} vs {len(face_data)}")
             continue
-        
         for vi, v in enumerate(f):
-            try:
-                vdata[v] = face_data[vi]
-            except IndexError as e:
-                print(f"Error: {e} | fi: {fi}, vi: {vi}, v: {v}, len(fdata): {len(fdata)}, len(fdata[{fi}]): {len(face_data)}")
-                raise e
+            vdata[v] = face_data[vi]
     return vdata
+
 
 def face_to_vertices_dup(faces, fdata, verts):
+    """Map per-face data to per-vertex, duplicating vertices when values conflict."""
     vdata = [None] * len(verts)
     for fi, f in enumerate(faces):
         if fi >= len(fdata):
-            print(f"Error: fi ({fi}) out of range for fdata (length {len(fdata)})")
+            log(f"face_to_vertices_dup: face index {fi} out of range (fdata length {len(fdata)})")
             continue
-        
         face_data = fdata[fi]
         if len(f) != len(face_data):
-            print(f"Error: Mismatch in length of faces[{fi}] ({len(f)}) and fdata[{fi}] ({len(face_data)})")
+            log(f"face_to_vertices_dup: mismatch at face {fi} — {len(f)} vs {len(face_data)}")
             continue
-        
         for vi, v in enumerate(f):
-            try:
-                if vdata[v] is None or vdata[v] == face_data[vi]:
-                    vdata[v] = face_data[vi]
-                else:
-                    newind = len(verts)
-                    verts.append(verts[v])
-                    faces[fi][vi] = newind
-                    vdata.append(face_data[vi])
-            except IndexError as e:
-                print(f"Error: {e} | fi: {fi}, vi: {vi}, v: {v}, len(fdata): {len(fdata)}, len(fdata[{fi}]): {len(face_data)}")
-                raise e
+            if vdata[v] is None or vdata[v] == face_data[vi]:
+                vdata[v] = face_data[vi]
+            else:
+                newind = len(verts)
+                verts.append(verts[v])
+                faces[fi][vi] = newind
+                vdata.append(face_data[vi])
     return vdata
 
 
+# ============================================================================
+# Bone data builder
+# ============================================================================
 
-def create_bone_data(armature, armMatrix, transform):
-    bones = []
-    for bone in sorted(armature.bones.values(), key=bone_depth):
-        bones.append(bone.name)
+def create_bone_data(armature, arm_matrix, transform):
+    bones = sorted(armature.bones.values(), key=bone_depth)
+    bone_names = [bone.name for bone in bones]
+
     bonedata = BytesIO()
-    for name in bones:
-        bone = armature.bones[name]
+    for bone in bones:
         base = bone.matrix_local.copy()
         if transform:
-            base = base @ armMatrix
-        baseInv = base.copy()
-        baseInv.invert()
-        if bone.parent:
-            parent_index = bones.index(bone.parent.name)
-        else:
-            parent_index = -1
-        baseInv.transpose()
+            base = base @ arm_matrix
+        base_inv = base.copy()
+        base_inv.invert()
+
+        parent_index = bone_names.index(bone.parent.name) if bone.parent else -1
+
+        base_inv.transpose()
         base.transpose()
+
         bonedata.write(struct.pack("<i", parent_index))
-        bonedata.write(struct.pack('<12f', *sum([list(row[0:3]) for row in baseInv], [])))
+        bonedata.write(struct.pack('<12f', *sum([list(row[0:3]) for row in base_inv], [])))
         bonedata.write(struct.pack('<12f', *sum([list(row[0:3]) for row in base], [])))
-        name = name.encode('utf8')
-        bonedata.write(struct.pack("B", len(name)))
-        bonedata.write(name)
+        name_bytes = bone.name.encode('utf8')
+        bonedata.write(struct.pack("B", len(name_bytes)))
+        bonedata.write(name_bytes)
         bonedata.write(struct.pack("B", 0))
-    return bones, bonedata.getvalue()
 
-def select_armature_and_mesh():
-    # Ensure the operator is called in the correct context
-    view_layer = bpy.context.view_layer
-    view_layer.objects.active = None
+    return bone_names, bonedata.getvalue()
 
+
+# ============================================================================
+# Selection helpers
+# ============================================================================
+
+def _select_objects_by_type(*types):
+    """Deselect all, then select objects matching the given type(s)."""
+    bpy.context.view_layer.objects.active = None
     bpy.ops.object.select_all(action='DESELECT')
-    
-    armatures_found = False
-    meshes_found = False
-    
+    found = set()
     for obj in bpy.data.objects:
-        if obj.type == 'ARMATURE':
+        if obj.type in types:
             obj.select_set(True)
-            armatures_found = True
-        if obj.type == 'MESH':
-            obj.select_set(True)
-            meshes_found = True
-    
-    if not armatures_found:
-        print("No armature objects found in the scene.")
-    if not meshes_found:
-        print("No mesh objects found in the scene.")
+            found.add(obj.type)
+    for t in types:
+        if t not in found:
+            log(f"No {t.lower()} objects found in the scene.")
 
-def select_armature():
-    # Ensure the operator is called in the correct context
-    view_layer = bpy.context.view_layer
-    view_layer.objects.active = None
 
-    bpy.ops.object.select_all(action='DESELECT')
+# ============================================================================
+# Mesh export
+# ============================================================================
 
-    armatures_found = False
-
-    for obj in bpy.data.objects:
-        if obj.type == 'ARMATURE':
-            obj.select_set(True)
-            armatures_found = True
-
-    if not armatures_found:
-        print("No armature objects found in the scene.")
-
-def export_k2_mesh(filename, applyMods):
-    select_armature_and_mesh()
+def export_k2_mesh(filename, apply_modifiers):
+    _select_objects_by_type('ARMATURE', 'MESH')
 
     meshes = []
     armature = None
+    arm_matrix = None
     for obj in bpy.context.selected_objects:
         if obj.type == 'MESH':
             matrix = obj.matrix_world
-            if applyMods:
+            if apply_modifiers:
                 depsgraph = bpy.context.evaluated_depsgraph_get()
                 me = obj.evaluated_get(depsgraph).to_mesh()
             else:
                 me = obj.data
             bm = bmesh.new()
             bm.from_mesh(me)
-            bmesh.ops.triangulate(bm, faces=bm.faces[:])  # Ensure all faces are triangulated
-            me = bm
-            me.transform(matrix)
-            meshes.append((obj, me))
+            bmesh.ops.triangulate(bm, faces=bm.faces[:])
+            bm.transform(matrix)
+            meshes.append((obj, bm))
         elif obj.type == 'ARMATURE':
             armature = obj.data
-            armMatrix = obj.matrix_world
+            arm_matrix = obj.matrix_world
+
+    bone_names = []
+    bonedata = b''
     if armature:
         armature.pose_position = 'REST'
-        bone_indices, bonedata = create_bone_data(armature, armMatrix, applyMods)
+        bone_names, bonedata = create_bone_data(armature, arm_matrix, apply_modifiers)
+
+    # Build bone_indices lookup: vertex group index -> bone index
+    bone_indices_map = {}
+
+    # Build header
     headdata = BytesIO()
-    headdata.write(struct.pack("<i", 3))
+    headdata.write(struct.pack("<i", 3))  # version
     headdata.write(struct.pack("<i", len(meshes)))
-    headdata.write(struct.pack("<i", 0))
-    headdata.write(struct.pack("<i", 0))
-    if armature:
-        headdata.write(struct.pack("<i", len(armature.bones.values())))
-    else:
-        headdata.write(struct.pack("<i", 0))
-    headdata.write(struct.pack("<6f", *generate_bbox([x for _, x in meshes])))
-    meshindex = 0
+    headdata.write(struct.pack("<i", 0))  # sprites
+    headdata.write(struct.pack("<i", 0))  # surfs
+    headdata.write(struct.pack("<i", len(armature.bones) if armature else 0))
+    headdata.write(struct.pack("<6f", *generate_bbox([bm for _, bm in meshes])))
 
-    # Ensure directory exists
     os.makedirs(os.path.dirname(filename), exist_ok=True)
 
-    file = open(filename, 'wb')
-    file.write(b'SMDL')
-    write_block(file, 'head', headdata.getvalue())
-    if armature:
-        write_block(file, 'bone', bonedata)
+    with open(filename, 'wb') as file:
+        file.write(b'SMDL')
+        write_block(file, 'head', headdata.getvalue())
+        if armature:
+            write_block(file, 'bone', bonedata)
 
-    for obj, mesh in meshes:
-        vert = [vert for vert in mesh.verts]
-        faces = []
-        ftexc = []
-        ftang = []
-        fcolr = []
-        flnk1 = []
-        uv_lay = mesh.loops.layers.uv.active
-        if not uv_lay:
-            ftexc = None
-        col_lay = mesh.loops.layers.color.active
-        if not col_lay:
-            fcolr = None
-        dvert_lay = mesh.verts.layers.deform.active
-        if dvert_lay:
-            flnk1 = [vert[dvert_lay].items() for vert in mesh.verts]
-        for f in mesh.faces:
-            uv = []
-            col = []
-            vindex = []
-            tang = []
-            for loop in f.loops:
-                if ftexc is not None:
-                    uv.append(loop[uv_lay].uv)
-                vindex.append(loop.vert.index)
-                if fcolr is not None:
-                    col.append(loop[col_lay].color)
-                tang.append(loop.calc_tangent())
-            if ftexc is not None:
-                ftexc.append(uv)
-            ftang.append(tang)
-            faces.append(vindex)
-            if fcolr:
-                fcolr.append(col)
-        if ftexc:
-            fsign = calcFaceSigns(ftexc)
-            sign = face_to_vertices(faces, fsign, vert)
-            texc = face_to_vertices(faces, ftexc, vert)
-            tang = face_to_vertices(faces, ftang, vert)
-        for i in range(len(vert)):
-            tang[i] = (tang[i] - vert[i].normal * tang[i].dot(vert[i].normal))
-            tang[i].normalize()
-        lnk1 = flnk1
-        if fcolr is not None:
-            colr = face_to_vertices(faces, fcolr, vert)
-        else:
-            colr = None
-        write_block(file, 'mesh', create_mesh_data(mesh, vert, meshindex, obj.name.encode('utf8'), obj.data.materials[0].name.encode('utf8')))
-        write_block(file, 'vrts', create_vrts_data(vert, meshindex))
-        new_indices = {}
-        for group in obj.vertex_groups:
-            new_indices[group.index] = bone_indices.index(group.name)
-        write_block(file, 'lnk1', create_lnk1_data(lnk1, meshindex, new_indices))
-        if len(faces) > 0:
-            write_block(file, 'face', create_face_data(vert, faces, meshindex))
-            if ftexc is not None:
-                write_block(file, "texc", create_texc_data(texc, meshindex))
-                for i in range(len(tang)):
-                    if sign[i] == 0:
-                        tang[i] = -(tang[i].copy())
-                write_block(file, "tang", create_tang_data(tang, meshindex))
-                write_block(file, "sign", create_sign_data(meshindex, sign))
-            write_block(file, "nrml", create_nrml_data(vert, meshindex))
-        if fcolr is not None:
-            write_block(file, "colr", create_colr_data(colr, meshindex))
+        for meshindex, (obj, mesh) in enumerate(meshes):
+            vert = list(mesh.verts)
+            faces = []
+            ftexc = []
+            ftang = []
+            fcolr = []
+            flnk1 = []
 
-        meshindex += 1
-        vlog('total vertices duplicated: %d' % (len(vert) - len(mesh.verts)))
+            uv_lay = mesh.loops.layers.uv.active
+            has_uv = uv_lay is not None
+            col_lay = mesh.loops.layers.color.active
+            has_color = col_lay is not None
+            dvert_lay = mesh.verts.layers.deform.active
+            if dvert_lay:
+                flnk1 = [v[dvert_lay].items() for v in mesh.verts]
 
-def export_k2_clip(filename, transform, frame_start, frame_end):
-    select_armature()
-    
-    objList = bpy.context.selected_objects
-    
-    if len(objList) != 1 or objList[0].type != 'ARMATURE':
-        err('Select needed armature only')
-        return
-    
-    armob = objList[0]
-    print(armob)
-    
-    motions = {}
-    vlog('baking animation')
-    
-    armature = armob.data
-    
-    if transform:
-        worldmat = armob.matrix_world
-    else:
-        worldmat = Matrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
-    
-    scene = bpy.context.scene
-    pose = armob.pose
-    
-    for frame in range(frame_start, frame_end + 1):
-        scene.frame_set(frame)
-        
-        for bone in pose.bones:
-            matrix = bone.matrix
-            if bone.parent:
-                matrix = bone.parent.matrix.inverted() @ matrix
-            if transform:
-                matrix = worldmat @ matrix
-            
-            if bone.name not in motions:
-                motions[bone.name] = [[] for _ in range(MKEY_COUNT)]
-            
-            motion = motions[bone.name]
-            translation = matrix.to_translation()
-            rotation = matrix.to_euler('YXZ')
-            scale = matrix.to_scale()
-            visibility = 255
-            motion[MKEY_X].append(translation[0])
-            motion[MKEY_Y].append(translation[1])
-            motion[MKEY_Z].append(translation[2])
-            motion[MKEY_PITCH].append(degrees(rotation[0]))  # Changed sign to correct flipped animation
-            motion[MKEY_ROLL].append(degrees(rotation[1]))  # Changed sign to correct flipped animation
-            motion[MKEY_YAW].append(degrees(rotation[2]))  # Changed sign to correct flipped animation
-            motion[MKEY_SCALE_X].append(scale[0])
-            motion[MKEY_SCALE_Y].append(scale[1])
-            motion[MKEY_SCALE_Z].append(scale[2])
-            motion[MKEY_VISIBILITY].append(visibility)
-    
-    headdata = BytesIO()
-    headdata.write(struct.pack("<i", 2))
-    headdata.write(struct.pack("<i", len(motions.keys())))
-    headdata.write(struct.pack("<i", frame_end - frame_start + 1))
-    
-    # Ensure directory exists
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    
-    file = open(filename, 'wb')
-    file.write(b'CLIP')
-    write_block(file, 'head', headdata.getvalue())
-    
-    index = 0
-    
-    for bone_name in sorted(armature.bones.keys(), key=lambda x: bone_depth(armature.bones[x])):
-        ClipBone(file, bone_name.encode('utf8'), motions[bone_name], index)
-        index += 1
-    
-    file.close()
+            for f in mesh.faces:
+                uv = []
+                col = []
+                vindex = []
+                tang = []
+                for loop in f.loops:
+                    if has_uv:
+                        uv.append(loop[uv_lay].uv)
+                    vindex.append(loop.vert.index)
+                    if has_color:
+                        col.append(loop[col_lay].color)
+                    tang.append(loop.calc_tangent())
+                if has_uv:
+                    ftexc.append(uv)
+                ftang.append(tang)
+                faces.append(vindex)
+                if has_color:
+                    fcolr.append(col)
 
-def ClipBone(file, bone_name, motion, index):
+            texc = None
+            tang_data = None
+            sign = None
+            if has_uv:
+                fsign = calc_face_signs(ftexc)
+                sign = face_to_vertices(faces, fsign, vert)
+                texc = face_to_vertices(faces, ftexc, vert)
+                tang_data = face_to_vertices(faces, ftang, vert)
+                for i in range(len(vert)):
+                    if tang_data[i] is not None:
+                        tang_data[i] = tang_data[i] - vert[i].normal * tang_data[i].dot(vert[i].normal)
+                        tang_data[i].normalize()
+
+            colr = face_to_vertices(faces, fcolr, vert) if has_color else None
+
+            # Material name (fallback to mesh name if no material assigned)
+            if obj.data.materials:
+                mat_name = obj.data.materials[0].name.encode('utf8')
+            else:
+                mat_name = obj.name.encode('utf8')
+
+            write_block(file, 'mesh', create_mesh_data(
+                mesh, vert, meshindex, obj.name.encode('utf8'), mat_name))
+            write_block(file, 'vrts', create_vrts_data(vert, meshindex))
+
+            if armature:
+                bone_indices_map = {}
+                for group in obj.vertex_groups:
+                    if group.name in bone_names:
+                        bone_indices_map[group.index] = bone_names.index(group.name)
+                write_block(file, 'lnk1', create_lnk1_data(flnk1, meshindex, bone_indices_map))
+
+            if faces:
+                write_block(file, 'face', create_face_data(vert, faces, meshindex))
+                if has_uv and texc is not None:
+                    write_block(file, "texc", create_texc_data(texc, meshindex))
+                    for i in range(len(tang_data)):
+                        if sign[i] == 0:
+                            tang_data[i] = -(tang_data[i].copy())
+                    write_block(file, "tang", create_tang_data(tang_data, meshindex))
+                    write_block(file, "sign", create_sign_data(meshindex, sign))
+                write_block(file, "nrml", create_nrml_data(vert, meshindex))
+            if colr is not None:
+                write_block(file, "colr", create_colr_data(colr, meshindex))
+
+            vlog(f'Mesh {meshindex}: {len(vert) - len(mesh.verts)} vertices duplicated')
+
+
+# ============================================================================
+# Clip export
+# ============================================================================
+
+def _write_clip_bone(file, bone_name_bytes, motion, index):
+    """Write all motion key channels for a single bone."""
     for keytype in range(MKEY_COUNT):
         keydata = BytesIO()
         key = motion[keytype]
@@ -464,13 +403,74 @@ def ClipBone(file, bone_name, motion, index):
         keydata.write(struct.pack("<i", index))
         keydata.write(struct.pack("<i", keytype))
         keydata.write(struct.pack("<i", numkeys))
-        keydata.write(struct.pack("B", len(bone_name)))
-        keydata.write(bone_name)
+        keydata.write(struct.pack("B", len(bone_name_bytes)))
+        keydata.write(bone_name_bytes)
         keydata.write(struct.pack("B", 0))
         if keytype == MKEY_VISIBILITY:
-            keydata.write(struct.pack('%dB' % numkeys, *key))
+            keydata.write(struct.pack(f'{numkeys}B', *key))
         else:
-            keydata.write(struct.pack('<%df' % numkeys, *key))
+            keydata.write(struct.pack(f'<{numkeys}f', *key))
         write_block(file, 'bmtn', keydata.getvalue())
 
 
+def export_k2_clip(filename, transform, frame_start, frame_end):
+    _select_objects_by_type('ARMATURE')
+
+    obj_list = bpy.context.selected_objects
+    if len(obj_list) != 1 or obj_list[0].type != 'ARMATURE':
+        err('Select needed armature only')
+        return
+
+    arm_ob = obj_list[0]
+    armature = arm_ob.data
+    motions = {}
+
+    vlog('Baking animation...')
+
+    world_mat = arm_ob.matrix_world if transform else Matrix.Identity(4)
+    scene = bpy.context.scene
+    pose = arm_ob.pose
+
+    for frame in range(frame_start, frame_end + 1):
+        scene.frame_set(frame)
+        for bone in pose.bones:
+            matrix = bone.matrix
+            if bone.parent:
+                matrix = bone.parent.matrix.inverted() @ matrix
+            if transform:
+                matrix = world_mat @ matrix
+
+            if bone.name not in motions:
+                motions[bone.name] = [[] for _ in range(MKEY_COUNT)]
+
+            motion = motions[bone.name]
+            translation = matrix.to_translation()
+            rotation = matrix.to_euler('YXZ')
+            scale = matrix.to_scale()
+
+            motion[MKEY_X].append(translation[0])
+            motion[MKEY_Y].append(translation[1])
+            motion[MKEY_Z].append(translation[2])
+            motion[MKEY_PITCH].append(degrees(rotation[0]))
+            motion[MKEY_ROLL].append(degrees(rotation[1]))
+            motion[MKEY_YAW].append(degrees(rotation[2]))
+            motion[MKEY_SCALE_X].append(scale[0])
+            motion[MKEY_SCALE_Y].append(scale[1])
+            motion[MKEY_SCALE_Z].append(scale[2])
+            motion[MKEY_VISIBILITY].append(255)
+
+    headdata = BytesIO()
+    headdata.write(struct.pack("<i", 2))  # version
+    headdata.write(struct.pack("<i", len(motions)))
+    headdata.write(struct.pack("<i", frame_end - frame_start + 1))
+
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+
+    with open(filename, 'wb') as file:
+        file.write(b'CLIP')
+        write_block(file, 'head', headdata.getvalue())
+
+        for index, bone_name in enumerate(
+            sorted(armature.bones.keys(), key=lambda x: bone_depth(armature.bones[x]))
+        ):
+            _write_clip_bone(file, bone_name.encode('utf8'), motions[bone_name], index)

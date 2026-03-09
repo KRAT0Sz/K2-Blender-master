@@ -1,10 +1,12 @@
 """
 K2 engine model (.model) and animation clip (.clip) exporter for Blender.
 Writes SMDL v3 meshes and CLIP v2 animations.
+Ported from the original S2 Games 3ds Max exporter (s2exporter.cpp).
 """
 
 import bpy
 import bmesh
+import shutil
 from io import BytesIO
 import struct
 import os
@@ -20,6 +22,45 @@ from .k2_common import (
     MKEY_SCALE_X, MKEY_SCALE_Y, MKEY_SCALE_Z,
     MKEY_COUNT,
 )
+
+# ============================================================================
+# Export settings container (mirrors K2ExportSettings PropertyGroup)
+# ============================================================================
+
+class ExportOptions:
+    """Plain data class to pass export settings from operators to export functions."""
+    __slots__ = (
+        'apply_modifiers', 'force_static', 'remove_hierarchy',
+        'copy_textures', 'export_geometry', 'export_materials',
+        'export_animation', 'frame_start', 'frame_end',
+    )
+
+    def __init__(self, **kw):
+        self.apply_modifiers = kw.get('apply_modifiers', True)
+        self.force_static = kw.get('force_static', False)
+        self.remove_hierarchy = kw.get('remove_hierarchy', False)
+        self.copy_textures = kw.get('copy_textures', True)
+        self.export_geometry = kw.get('export_geometry', True)
+        self.export_materials = kw.get('export_materials', True)
+        self.export_animation = kw.get('export_animation', False)
+        self.frame_start = kw.get('frame_start', 0)
+        self.frame_end = kw.get('frame_end', 250)
+
+    @staticmethod
+    def from_scene(scene):
+        s = scene.k2_export_settings
+        return ExportOptions(
+            apply_modifiers=s.apply_modifiers,
+            force_static=s.force_static,
+            remove_hierarchy=s.remove_hierarchy,
+            copy_textures=s.copy_textures,
+            export_geometry=s.export_geometry,
+            export_materials=s.export_materials,
+            export_animation=s.export_animation,
+            frame_start=s.frame_start,
+            frame_end=s.frame_end,
+        )
+
 
 # ============================================================================
 # Binary writing helpers
@@ -42,6 +83,8 @@ def generate_bbox(meshes):
             xx.append(v.co[0])
             yy.append(v.co[1])
             zz.append(v.co[2])
+    if not xx:
+        return [0, 0, 0, 0, 0, 0]
     return [min(xx), min(yy), min(zz), max(xx), max(yy), max(zz)]
 
 
@@ -49,13 +92,13 @@ def generate_bbox(meshes):
 # Chunk data builders
 # ============================================================================
 
-def create_mesh_data(mesh, vert, index, name, mname):
+def create_mesh_data(mesh, vert, index, name, mname, bone_link=-1):
     buf = BytesIO()
     buf.write(struct.pack("<i", index))
     buf.write(struct.pack("<i", 1))  # mode
     buf.write(struct.pack("<i", len(vert)))
     buf.write(struct.pack("<6f", *generate_bbox([mesh])))
-    buf.write(struct.pack("<i", -1))  # bone link (TODO: proper value)
+    buf.write(struct.pack("<i", bone_link))
     buf.write(struct.pack("<B", len(name)))
     buf.write(struct.pack("<B", len(mname)))
     buf.write(name)
@@ -206,7 +249,8 @@ def face_to_vertices_dup(faces, fdata, verts):
 # Bone data builder
 # ============================================================================
 
-def create_bone_data(armature, arm_matrix, transform):
+def create_bone_data(armature, arm_matrix, transform, flatten_hierarchy=False):
+    """Build bone chunk data. If flatten_hierarchy is True, all bones parent to root."""
     bones = sorted(armature.bones.values(), key=bone_depth)
     bone_names = [bone.name for bone in bones]
 
@@ -218,7 +262,10 @@ def create_bone_data(armature, arm_matrix, transform):
         base_inv = base.copy()
         base_inv.invert()
 
-        parent_index = bone_names.index(bone.parent.name) if bone.parent else -1
+        if flatten_hierarchy:
+            parent_index = -1
+        else:
+            parent_index = bone_names.index(bone.parent.name) if bone.parent else -1
 
         base_inv.transpose()
         base.transpose()
@@ -253,19 +300,81 @@ def _select_objects_by_type(*types):
 
 
 # ============================================================================
+# Texture copy helper
+# ============================================================================
+
+def _copy_textures(meshes_objs, export_dir):
+    """Copy texture files referenced by materials to the export directory."""
+    copied = set()
+    for obj in meshes_objs:
+        for mat_slot in obj.material_slots:
+            mat = mat_slot.material
+            if not mat or not mat.use_nodes:
+                continue
+            for node in mat.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image and node.image.filepath:
+                    src = bpy.path.abspath(node.image.filepath)
+                    if src in copied or not os.path.isfile(src):
+                        continue
+                    dst = os.path.join(export_dir, os.path.basename(src))
+                    try:
+                        shutil.copy2(src, dst)
+                        vlog(f"Copied texture: {os.path.basename(src)}")
+                        copied.add(src)
+                    except Exception as e:
+                        log(f"Failed to copy texture {src}: {e}")
+
+
+# ============================================================================
+# Per-mesh K2 settings helpers
+# ============================================================================
+
+def _get_mesh_type(obj):
+    """Return the K2 mesh type string for an object."""
+    if hasattr(obj, 'k2_mesh_settings'):
+        return obj.k2_mesh_settings.mesh_type
+    if obj.name.startswith('_surf'):
+        return 'COLLISION'
+    if obj.name.startswith('_bone'):
+        return 'REFBONE'
+    return 'NORMAL'
+
+
+def _should_exclude_normals(obj):
+    if hasattr(obj, 'k2_mesh_settings'):
+        return obj.k2_mesh_settings.exclude_normals
+    return False
+
+
+# ============================================================================
 # Mesh export
 # ============================================================================
 
-def export_k2_mesh(filename, apply_modifiers):
+def export_k2_mesh(filename, opts=None):
+    """
+    Export scene meshes to a K2 .model file.
+    opts: ExportOptions instance (or None for legacy call with apply_modifiers bool).
+    """
+    if opts is None or isinstance(opts, bool):
+        apply_mod = opts if isinstance(opts, bool) else True
+        opts = ExportOptions(apply_modifiers=apply_mod)
+
     _select_objects_by_type('ARMATURE', 'MESH')
 
     meshes = []
+    mesh_objs = []
     armature = None
     arm_matrix = None
+
     for obj in bpy.context.selected_objects:
         if obj.type == 'MESH':
+            mesh_type = _get_mesh_type(obj)
+            if mesh_type in ('REFBONE', 'SPRITE', 'GROUND'):
+                vlog(f"Skipping non-geometry mesh '{obj.name}' (type={mesh_type})")
+                continue
+
             matrix = obj.matrix_world
-            if apply_modifiers:
+            if opts.apply_modifiers:
                 depsgraph = bpy.context.evaluated_depsgraph_get()
                 me = obj.evaluated_get(depsgraph).to_mesh()
             else:
@@ -274,51 +383,65 @@ def export_k2_mesh(filename, apply_modifiers):
             bm.from_mesh(me)
             bmesh.ops.triangulate(bm, faces=bm.faces[:])
             bm.transform(matrix)
-            meshes.append((obj, bm))
+            meshes.append((obj, bm, mesh_type))
+            mesh_objs.append(obj)
         elif obj.type == 'ARMATURE':
             armature = obj.data
             arm_matrix = obj.matrix_world
 
+    use_armature = armature and not opts.force_static
     bone_names = []
     bonedata = b''
-    if armature:
+    if use_armature:
         armature.pose_position = 'REST'
-        bone_names, bonedata = create_bone_data(armature, arm_matrix, apply_modifiers)
+        bone_names, bonedata = create_bone_data(
+            armature, arm_matrix, opts.apply_modifiers,
+            flatten_hierarchy=opts.remove_hierarchy,
+        )
 
-    # Build bone_indices lookup: vertex group index -> bone index
-    bone_indices_map = {}
+    num_normal_meshes = sum(1 for _, _, mt in meshes if mt == 'NORMAL')
+    num_surfs = sum(1 for _, _, mt in meshes if mt == 'COLLISION')
 
     # Build header
     headdata = BytesIO()
     headdata.write(struct.pack("<i", 3))  # version
-    headdata.write(struct.pack("<i", len(meshes)))
+    headdata.write(struct.pack("<i", num_normal_meshes))
     headdata.write(struct.pack("<i", 0))  # sprites
-    headdata.write(struct.pack("<i", 0))  # surfs
-    headdata.write(struct.pack("<i", len(armature.bones) if armature else 0))
-    headdata.write(struct.pack("<6f", *generate_bbox([bm for _, bm in meshes])))
+    headdata.write(struct.pack("<i", num_surfs))
+    headdata.write(struct.pack("<i", len(armature.bones) if use_armature else 0))
+    all_bm = [bm for _, bm, _ in meshes]
+    headdata.write(struct.pack("<6f", *generate_bbox(all_bm)))
 
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    export_dir = os.path.dirname(filename)
+    if export_dir:
+        os.makedirs(export_dir, exist_ok=True)
 
     with open(filename, 'wb') as file:
         file.write(b'SMDL')
         write_block(file, 'head', headdata.getvalue())
-        if armature:
+        if use_armature:
             write_block(file, 'bone', bonedata)
 
-        for meshindex, (obj, mesh) in enumerate(meshes):
+        meshindex = 0
+        for obj, mesh, mesh_type in meshes:
+            if not opts.export_geometry and mesh_type == 'NORMAL':
+                meshindex += 1
+                continue
+
             vert = list(mesh.verts)
             faces = []
             ftexc = []
             ftang = []
             fcolr = []
             flnk1 = []
+            exclude_nrml = _should_exclude_normals(obj)
 
             uv_lay = mesh.loops.layers.uv.active
             has_uv = uv_lay is not None
             col_lay = mesh.loops.layers.color.active
             has_color = col_lay is not None
             dvert_lay = mesh.verts.layers.deform.active
-            if dvert_lay:
+            if dvert_lay and not opts.force_static:
                 flnk1 = [v[dvert_lay].items() for v in mesh.verts]
 
             for f in mesh.faces:
@@ -355,8 +478,7 @@ def export_k2_mesh(filename, apply_modifiers):
 
             colr = face_to_vertices(faces, fcolr, vert) if has_color else None
 
-            # Material name (fallback to mesh name if no material assigned)
-            if obj.data.materials:
+            if obj.data.materials and opts.export_materials:
                 mat_name = obj.data.materials[0].name.encode('utf8')
             else:
                 mat_name = obj.name.encode('utf8')
@@ -365,7 +487,7 @@ def export_k2_mesh(filename, apply_modifiers):
                 mesh, vert, meshindex, obj.name.encode('utf8'), mat_name))
             write_block(file, 'vrts', create_vrts_data(vert, meshindex))
 
-            if armature:
+            if use_armature and flnk1:
                 bone_indices_map = {}
                 for group in obj.vertex_groups:
                     if group.name in bone_names:
@@ -381,11 +503,18 @@ def export_k2_mesh(filename, apply_modifiers):
                             tang_data[i] = -(tang_data[i].copy())
                     write_block(file, "tang", create_tang_data(tang_data, meshindex))
                     write_block(file, "sign", create_sign_data(meshindex, sign))
-                write_block(file, "nrml", create_nrml_data(vert, meshindex))
+                if not exclude_nrml:
+                    write_block(file, "nrml", create_nrml_data(vert, meshindex))
             if colr is not None:
                 write_block(file, "colr", create_colr_data(colr, meshindex))
 
-            vlog(f'Mesh {meshindex}: {len(vert) - len(mesh.verts)} vertices duplicated')
+            vlog(f'Mesh {meshindex} ({obj.name}): {len(vert) - len(mesh.verts)} verts duplicated')
+            meshindex += 1
+
+    if opts.copy_textures and export_dir:
+        _copy_textures(mesh_objs, export_dir)
+
+    log(f"Exported {len(meshes)} mesh(es) to {filename}")
 
 
 # ============================================================================
@@ -413,7 +542,19 @@ def _write_clip_bone(file, bone_name_bytes, motion, index):
         write_block(file, 'bmtn', keydata.getvalue())
 
 
-def export_k2_clip(filename, transform, frame_start, frame_end):
+def export_k2_clip(filename, opts=None, frame_start=None, frame_end=None):
+    """
+    Export animation to a K2 .clip file.
+    opts: ExportOptions instance (or bool for legacy apply_modifiers).
+    """
+    if opts is None or isinstance(opts, bool):
+        transform = opts if isinstance(opts, bool) else True
+        opts = ExportOptions(apply_modifiers=transform)
+    if frame_start is not None:
+        opts.frame_start = frame_start
+    if frame_end is not None:
+        opts.frame_end = frame_end
+
     _select_objects_by_type('ARMATURE')
 
     obj_list = bpy.context.selected_objects
@@ -427,17 +568,17 @@ def export_k2_clip(filename, transform, frame_start, frame_end):
 
     vlog('Baking animation...')
 
-    world_mat = arm_ob.matrix_world if transform else Matrix.Identity(4)
+    world_mat = arm_ob.matrix_world if opts.apply_modifiers else Matrix.Identity(4)
     scene = bpy.context.scene
     pose = arm_ob.pose
 
-    for frame in range(frame_start, frame_end + 1):
+    for frame in range(opts.frame_start, opts.frame_end + 1):
         scene.frame_set(frame)
         for bone in pose.bones:
             matrix = bone.matrix
             if bone.parent:
                 matrix = bone.parent.matrix.inverted() @ matrix
-            if transform:
+            if opts.apply_modifiers:
                 matrix = world_mat @ matrix
 
             if bone.name not in motions:
@@ -462,9 +603,11 @@ def export_k2_clip(filename, transform, frame_start, frame_end):
     headdata = BytesIO()
     headdata.write(struct.pack("<i", 2))  # version
     headdata.write(struct.pack("<i", len(motions)))
-    headdata.write(struct.pack("<i", frame_end - frame_start + 1))
+    headdata.write(struct.pack("<i", opts.frame_end - opts.frame_start + 1))
 
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    export_dir = os.path.dirname(filename)
+    if export_dir:
+        os.makedirs(export_dir, exist_ok=True)
 
     with open(filename, 'wb') as file:
         file.write(b'CLIP')
@@ -474,3 +617,5 @@ def export_k2_clip(filename, transform, frame_start, frame_end):
             sorted(armature.bones.keys(), key=lambda x: bone_depth(armature.bones[x]))
         ):
             _write_clip_bone(file, bone_name.encode('utf8'), motions[bone_name], index)
+
+    log(f"Exported clip ({opts.frame_end - opts.frame_start + 1} frames) to {filename}")

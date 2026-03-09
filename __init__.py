@@ -177,8 +177,8 @@ class K2MeshExporter(bpy.types.Operator):
 
     def execute(self, context):
         from . import k2_export
-        settings = context.scene.k2_export_settings
-        k2_export.export_k2_mesh(self.filepath, settings.apply_modifiers)
+        opts = k2_export.ExportOptions.from_scene(context.scene)
+        k2_export.export_k2_mesh(self.filepath, opts)
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -199,11 +199,8 @@ class K2ClipExporter(bpy.types.Operator):
 
     def execute(self, context):
         from . import k2_export
-        settings = context.scene.k2_export_settings
-        k2_export.export_k2_clip(
-            self.filepath, settings.apply_modifiers,
-            settings.frame_start, settings.frame_end,
-        )
+        opts = k2_export.ExportOptions.from_scene(context.scene)
+        k2_export.export_k2_clip(self.filepath, opts)
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -218,19 +215,50 @@ class K2ClipExporter(bpy.types.Operator):
 # ============================================================================
 
 class K2_OT_SceneInfo(bpy.types.Operator):
-    """Display K2 scene statistics"""
+    """Display K2 scene statistics (mirrors original S2 exporter Scene Info)"""
     bl_idname = "k2.scene_info"
     bl_label = "Scene Info"
 
     def execute(self, context):
-        meshes = sum(1 for o in bpy.data.objects if o.type == 'MESH')
-        armatures = sum(1 for o in bpy.data.objects if o.type == 'ARMATURE')
-        bones = sum(len(o.data.bones) for o in bpy.data.objects if o.type == 'ARMATURE')
-        verts = sum(len(o.data.vertices) for o in bpy.data.objects if o.type == 'MESH')
-        self.report(
-            {'INFO'},
-            f"Meshes: {meshes} | Verts: {verts} | Armatures: {armatures} | Bones: {bones}",
-        )
+        total_verts = 0
+        total_faces = 0
+        num_meshes = 0
+        num_surfs = 0
+        num_sprites = 0
+        num_bones = 0
+        num_skinned = 0
+        num_static = 0
+
+        for obj in bpy.data.objects:
+            if obj.type == 'MESH':
+                mt = 'NORMAL'
+                if hasattr(obj, 'k2_mesh_settings'):
+                    mt = obj.k2_mesh_settings.mesh_type
+                if mt == 'COLLISION':
+                    num_surfs += 1
+                elif mt in ('SPRITE', 'GROUND'):
+                    num_sprites += 1
+                else:
+                    num_meshes += 1
+                    total_verts += len(obj.data.vertices)
+                    total_faces += len(obj.data.polygons)
+                    has_armature_mod = any(
+                        m.type == 'ARMATURE' for m in obj.modifiers
+                    )
+                    if has_armature_mod:
+                        num_skinned += 1
+                    else:
+                        num_static += 1
+            elif obj.type == 'ARMATURE':
+                num_bones += len(obj.data.bones)
+
+        lines = [
+            f"{total_verts} vertices, {total_faces} faces",
+            f"{num_meshes} meshes, {num_bones} bones",
+            f"{num_surfs} collision surfaces, {num_sprites} sprites",
+            f"Skinned: {num_skinned}, Static: {num_static}",
+        ]
+        self.report({'INFO'}, " | ".join(lines))
         return {'FINISHED'}
 
 

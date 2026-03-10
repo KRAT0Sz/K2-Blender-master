@@ -263,6 +263,95 @@ class K2_OT_SceneInfo(bpy.types.Operator):
 
 
 # ============================================================================
+# Armature display operators
+# ============================================================================
+
+def _get_armature_objects():
+    return [o for o in bpy.data.objects if o.type == 'ARMATURE']
+
+
+class K2_OT_ToggleBoneNames(bpy.types.Operator):
+    """Toggle bone name display for all armatures in the scene"""
+    bl_idname = "k2.toggle_bone_names"
+    bl_label = "Toggle Bone Names"
+
+    def execute(self, context):
+        arms = _get_armature_objects()
+        if not arms:
+            self.report({'WARNING'}, "No armatures in scene")
+            return {'CANCELLED'}
+        new_state = not arms[0].data.show_names
+        for obj in arms:
+            obj.data.show_names = new_state
+        self.report({'INFO'}, f"Bone names: {'ON' if new_state else 'OFF'}")
+        return {'FINISHED'}
+
+
+class K2_OT_FixBoneDisplay(bpy.types.Operator):
+    """Set bone display to visible colors (cyan/yellow) and STICK mode"""
+    bl_idname = "k2.fix_bone_display"
+    bl_label = "Fix Bone Colors"
+
+    def execute(self, context):
+        arms = _get_armature_objects()
+        if not arms:
+            self.report({'WARNING'}, "No armatures in scene")
+            return {'CANCELLED'}
+        count = 0
+        for obj in arms:
+            arm = obj.data
+            arm.display_type = 'STICK'
+            for bone in arm.bones:
+                bone.color.palette = 'CUSTOM'
+                bone.color.custom.normal = (0.0, 0.75, 1.0)
+                bone.color.custom.select = (1.0, 0.85, 0.0)
+                bone.color.custom.active = (0.2, 1.0, 0.4)
+                count += 1
+        self.report({'INFO'}, f"Fixed {count} bones across {len(arms)} armature(s)")
+        return {'FINISHED'}
+
+
+class K2_OT_ResetBoneDisplay(bpy.types.Operator):
+    """Reset bone colors back to Blender defaults"""
+    bl_idname = "k2.reset_bone_display"
+    bl_label = "Reset Bone Colors"
+
+    def execute(self, context):
+        arms = _get_armature_objects()
+        if not arms:
+            self.report({'WARNING'}, "No armatures in scene")
+            return {'CANCELLED'}
+        for obj in arms:
+            arm = obj.data
+            arm.display_type = 'OCTAHEDRAL'
+            for bone in arm.bones:
+                bone.color.palette = 'DEFAULT'
+        self.report({'INFO'}, "Bone display reset to defaults")
+        return {'FINISHED'}
+
+
+class K2_OT_SetBoneDisplayType(bpy.types.Operator):
+    """Cycle armature bone display type"""
+    bl_idname = "k2.cycle_bone_display"
+    bl_label = "Cycle Display Type"
+
+    _types = ['OCTAHEDRAL', 'STICK', 'BBONE', 'ENVELOPE', 'WIRE']
+
+    def execute(self, context):
+        arms = _get_armature_objects()
+        if not arms:
+            self.report({'WARNING'}, "No armatures in scene")
+            return {'CANCELLED'}
+        cur = arms[0].data.display_type
+        idx = (self._types.index(cur) + 1) % len(self._types) if cur in self._types else 0
+        new_type = self._types[idx]
+        for obj in arms:
+            obj.data.display_type = new_type
+        self.report({'INFO'}, f"Bone display: {new_type}")
+        return {'FINISHED'}
+
+
+# ============================================================================
 # Helper — get custom logo icon
 # ============================================================================
 
@@ -351,6 +440,47 @@ class K2_PT_ImportPanel(bpy.types.Panel):
         layout.prop(settings, "flip_uv")
 
 
+class K2_PT_ArmaturePanel(bpy.types.Panel):
+    """Armature display tools — bone names, colors, display type"""
+    bl_label = "Armature"
+    bl_idname = "K2_PT_ArmaturePanel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'K2'
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == 'ARMATURE' for o in bpy.data.objects)
+
+    def draw(self, context):
+        layout = self.layout
+        arms = _get_armature_objects()
+        if not arms:
+            return
+
+        arm = arms[0].data
+        show_names = arm.show_names
+
+        box = layout.box()
+        box.label(text="Bone Names")
+        row = box.row(align=True)
+        icon = 'HIDE_OFF' if show_names else 'HIDE_ON'
+        row.operator("k2.toggle_bone_names", text="Names ON" if show_names else "Names OFF", icon=icon)
+
+        box = layout.box()
+        box.label(text="Bone Display")
+        row = box.row(align=True)
+        row.operator("k2.fix_bone_display", text="Fix Colors", icon='COLORSET_09_VEC')
+        row.operator("k2.reset_bone_display", text="Reset", icon='LOOP_BACK')
+
+        row = box.row(align=True)
+        row.operator("k2.cycle_bone_display", text=f"Style: {arm.display_type}", icon='BONE_DATA')
+
+        box.separator()
+        box.prop(arm, "show_axes", text="Show Bone Axes")
+        box.prop(arm, "relation_line_position", text="Relation Lines")
+
+
 class K2_PT_MeshInfoPanel(bpy.types.Panel):
     """Bottom section: Mesh Info — mesh type, options, materials"""
     bl_label = "Mesh Info"
@@ -425,8 +555,13 @@ _classes = (
     K2MeshExporter,
     K2ClipExporter,
     K2_OT_SceneInfo,
+    K2_OT_ToggleBoneNames,
+    K2_OT_FixBoneDisplay,
+    K2_OT_ResetBoneDisplay,
+    K2_OT_SetBoneDisplayType,
     K2_PT_ExportPanel,
     K2_PT_ImportPanel,
+    K2_PT_ArmaturePanel,
     K2_PT_MeshInfoPanel,
 )
 

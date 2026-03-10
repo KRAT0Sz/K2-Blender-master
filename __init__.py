@@ -37,6 +37,11 @@ class K2ImportSettings(bpy.types.PropertyGroup):
         description="Flip UV coordinates",
         default=True,
     )
+    import_textures: BoolProperty(
+        name="Import Textures",
+        description="Auto-detect and load textures (color, normal, MRAO, emissive) from model directory",
+        default=True,
+    )
 
 
 class K2ExportSettings(bpy.types.PropertyGroup):
@@ -131,7 +136,7 @@ class K2Importer(bpy.types.Operator):
     def execute(self, context):
         from . import k2_import
         settings = context.scene.k2_import_settings
-        k2_import.read(self.filepath, settings.flip_uv)
+        k2_import.read(self.filepath, settings.flip_uv, settings.import_textures)
 
         from .k2_common import view_all_in_3d_view
         if not view_all_in_3d_view():
@@ -437,7 +442,9 @@ class K2_PT_ImportPanel(bpy.types.Panel):
         row.operator("import_mesh.k2", text="Mesh")
         row.operator("import_clip.k2", text="Clip")
 
-        layout.prop(settings, "flip_uv")
+        col = layout.column(align=True)
+        col.prop(settings, "flip_uv")
+        col.prop(settings, "import_textures")
 
 
 class K2_PT_ArmaturePanel(bpy.types.Panel):

@@ -296,18 +296,134 @@ def _read_mesh_header_v1(honchunk):
 
 
 # ============================================================================
+# Texture auto-detection and material setup
+# ============================================================================
+
+import os
+import glob as _glob
+
+_TEX_SUFFIXES = {
+    'color':    ['_color', '_diff', '_diffuse', '_albedo', ''],
+    'normal':   ['_normal', '_nrm', '_norm', '_n'],
+    'mrao':     ['_mrao', '_orm', '_ao_rough_metal'],
+    'emissive': ['_emissive', '_emis', '_glow', '_self'],
+}
+_TEX_EXTENSIONS = ['.tga', '.png', '.dds', '.jpg', '.jpeg', '.bmp', '.tif']
+
+
+def _find_texture(base_dir, mat_name, tex_type):
+    """Search for a texture file matching the material name and texture type."""
+    for suffix in _TEX_SUFFIXES.get(tex_type, []):
+        for ext in _TEX_EXTENSIONS:
+            candidates = [
+                os.path.join(base_dir, f"{mat_name}{suffix}{ext}"),
+                os.path.join(base_dir, f"{mat_name}{suffix}{ext}".lower()),
+            ]
+            for path in candidates:
+                matches = _glob.glob(path)
+                if matches:
+                    return matches[0]
+    return None
+
+
+def _setup_material_textures(mat, model_dir, mat_name):
+    """Set up Principled BSDF with auto-detected texture maps."""
+    mat.use_nodes = True
+    tree = mat.node_tree
+    tree.nodes.clear()
+
+    output = tree.nodes.new('ShaderNodeOutputMaterial')
+    output.location = (600, 0)
+
+    bsdf = tree.nodes.new('ShaderNodeBsdfPrincipled')
+    bsdf.location = (200, 0)
+    tree.links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
+
+    x_offset = -600
+    y_pos = 400
+    any_loaded = False
+
+    color_path = _find_texture(model_dir, mat_name, 'color')
+    if color_path:
+        tex = tree.nodes.new('ShaderNodeTexImage')
+        tex.location = (x_offset, y_pos)
+        tex.label = "Color"
+        tex.image = bpy.data.images.load(color_path, check_existing=True)
+        tree.links.new(tex.outputs['Color'], bsdf.inputs['Base Color'])
+        tree.links.new(tex.outputs['Alpha'], bsdf.inputs['Alpha'])
+        mat.blend_method = 'CLIP' if tex.image.depth == 32 else 'OPAQUE'
+        vlog(f"  Color texture: {os.path.basename(color_path)}")
+        y_pos -= 300
+        any_loaded = True
+
+    normal_path = _find_texture(model_dir, mat_name, 'normal')
+    if normal_path:
+        tex = tree.nodes.new('ShaderNodeTexImage')
+        tex.location = (x_offset, y_pos)
+        tex.label = "Normal"
+        tex.image = bpy.data.images.load(normal_path, check_existing=True)
+        tex.image.colorspace_settings.name = 'Non-Color'
+        nmap = tree.nodes.new('ShaderNodeNormalMap')
+        nmap.location = (x_offset + 300, y_pos)
+        tree.links.new(tex.outputs['Color'], nmap.inputs['Color'])
+        tree.links.new(nmap.outputs['Normal'], bsdf.inputs['Normal'])
+        vlog(f"  Normal texture: {os.path.basename(normal_path)}")
+        y_pos -= 300
+        any_loaded = True
+
+    mrao_path = _find_texture(model_dir, mat_name, 'mrao')
+    if mrao_path:
+        tex = tree.nodes.new('ShaderNodeTexImage')
+        tex.location = (x_offset, y_pos)
+        tex.label = "MRAO"
+        tex.image = bpy.data.images.load(mrao_path, check_existing=True)
+        tex.image.colorspace_settings.name = 'Non-Color'
+
+        sep = tree.nodes.new('ShaderNodeSeparateColor')
+        sep.location = (x_offset + 300, y_pos)
+        tree.links.new(tex.outputs['Color'], sep.inputs['Color'])
+
+        tree.links.new(sep.outputs['Red'], bsdf.inputs['Metallic'])
+        tree.links.new(sep.outputs['Green'], bsdf.inputs['Roughness'])
+
+        vlog(f"  MRAO texture: {os.path.basename(mrao_path)}")
+        y_pos -= 300
+        any_loaded = True
+
+    emissive_path = _find_texture(model_dir, mat_name, 'emissive')
+    if emissive_path:
+        tex = tree.nodes.new('ShaderNodeTexImage')
+        tex.location = (x_offset, y_pos)
+        tex.label = "Emissive"
+        tex.image = bpy.data.images.load(emissive_path, check_existing=True)
+        tree.links.new(tex.outputs['Color'], bsdf.inputs['Emission Color'])
+        bsdf.inputs['Emission Strength'].default_value = 1.0
+        vlog(f"  Emissive texture: {os.path.basename(emissive_path)}")
+        any_loaded = True
+
+    if not any_loaded:
+        vlog(f"  No textures found for material '{mat_name}' in {model_dir}")
+
+    return any_loaded
+
+
+# ============================================================================
 # Blender object builders
 # ============================================================================
 
 def _build_mesh_object(scn, meshname, materialname, verts, faces, texc, flipuv,
-                       vgroups, bone_link, bone_names, rig, is_surf):
+                       vgroups, bone_link, bone_names, rig, is_surf,
+                       model_dir='', import_textures=True):
     """Create a Blender mesh object with UVs, vertex groups, and armature modifier."""
     msh = bpy.data.meshes.new(name=meshname)
     msh.from_pydata(verts, [], faces)
     msh.update()
 
     if materialname:
-        msh.materials.append(bpy.data.materials.new(materialname))
+        mat = bpy.data.materials.new(materialname)
+        msh.materials.append(mat)
+        if import_textures and model_dir:
+            _setup_material_textures(mat, model_dir, materialname)
 
     if texc:
         if flipuv:
@@ -354,8 +470,9 @@ def _build_mesh_object(scn, meshname, materialname, verts, faces, texc, flipuv,
 # Main mesh import
 # ============================================================================
 
-def create_blender_mesh(filename, objname, flipuv):
+def create_blender_mesh(filename, objname, flipuv, import_textures=True):
     """Import a K2 .model file into Blender."""
+    model_dir = os.path.dirname(os.path.abspath(filename))
     try:
         with open(filename, 'rb') as file:
             sig = file.read(4)
@@ -447,6 +564,7 @@ def create_blender_mesh(filename, objname, flipuv):
                     obj = _build_mesh_object(
                         scn, meshname, materialname, verts, faces, texc, flipuv,
                         vgroups, bone_link, bone_names, rig, is_surf=False,
+                        model_dir=model_dir, import_textures=import_textures,
                     )
 
                 elif honchunk.getname() == b'surf':
@@ -459,6 +577,7 @@ def create_blender_mesh(filename, objname, flipuv):
                     obj = _build_mesh_object(
                         scn, f'{objname}_surf', None, surf_points, surf_tris, [], flipuv,
                         {}, -1, bone_names, rig, is_surf=True,
+                        model_dir=model_dir, import_textures=False,
                     )
 
                     try:
@@ -617,6 +736,6 @@ def readclip(filepath):
     create_blender_clip(filepath, obj_name)
 
 
-def read(filepath, flipuv):
+def read(filepath, flipuv, import_textures=True):
     obj_name = bpy.path.display_name_from_filepath(filepath)
-    create_blender_mesh(filepath, obj_name, flipuv)
+    create_blender_mesh(filepath, obj_name, flipuv, import_textures=import_textures)

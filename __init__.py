@@ -70,6 +70,14 @@ class K2ImportSettings(bpy.types.PropertyGroup):
 
 
 class K2ExportSettings(bpy.types.PropertyGroup):
+    export_mode: EnumProperty(
+        name="Export Mode",
+        items=[
+            ('STATIC', "Static Mesh", "Export as static mesh without animation"),
+            ('ANIMATED', "Animated Mesh", "Export with skeleton and animation"),
+        ],
+        default='STATIC',
+    )
     force_static: BoolProperty(
         name="Force Static",
         description="Export without skeleton/animation",
@@ -468,9 +476,17 @@ class K2_PT_ExportPanel(bpy.types.Panel):
 
         layout.separator()
 
-        # ---- Export options ----
+        # ---- Export Mode box (radio buttons like 3ds Max) ----
         box = layout.box()
-        box.label(text="Export options")
+        box.label(text="Export Mode")
+        col = box.column(align=True)
+        col.prop(settings, "export_mode", expand=True)
+
+        layout.separator()
+
+        # ---- Export Options box ----
+        box = layout.box()
+        box.label(text="Export Options")
         col = box.column(align=True)
         col.prop(settings, "force_static")
         col.prop(settings, "remove_hierarchy")
@@ -482,6 +498,7 @@ class K2_PT_ExportPanel(bpy.types.Panel):
 
         box.separator()
 
+        # ---- Export Buttons (side by side like 3ds Max) ----
         row = box.row(align=True)
         row.operator("export_mesh.k2", text="Export")
         row.operator("export_clip.k2", text="Clip")
@@ -495,7 +512,12 @@ class K2_PT_ExportPanel(bpy.types.Panel):
             row_fr.prop(settings, "frame_end")
             layout.separator()
 
-        layout.operator("k2.scene_info", text="Scene Info")
+        layout.separator()
+
+        # ---- Bottom buttons (Scene Info + Close) ----
+        row = layout.row(align=True)
+        row.operator("k2.scene_info", text="Scene Info")
+        row.operator("wm.quit_blender", text="Close", icon='X')
 
 
 class K2_PT_ImportPanel(bpy.types.Panel):

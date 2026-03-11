@@ -32,7 +32,7 @@ class ExportOptions:
     __slots__ = (
         'apply_modifiers', 'force_static', 'remove_hierarchy',
         'copy_textures', 'export_geometry', 'export_model_def', 'export_materials',
-        'export_animation', 'frame_start', 'frame_end',
+        'export_animation', 'frame_start', 'frame_end', 'export_mode',
     )
 
     def __init__(self, **kw):
@@ -46,13 +46,16 @@ class ExportOptions:
         self.export_animation = kw.get('export_animation', False)
         self.frame_start = kw.get('frame_start', 0)
         self.frame_end = kw.get('frame_end', 250)
+        self.export_mode = kw.get('export_mode', 'STATIC')
 
     @staticmethod
     def from_scene(scene):
         s = scene.k2_export_settings
+        # export_mode controls force_static: STATIC = True, ANIMATED = False
+        force_static = s.export_mode == 'STATIC'
         return ExportOptions(
             apply_modifiers=s.apply_modifiers,
-            force_static=s.force_static,
+            force_static=force_static,
             remove_hierarchy=s.remove_hierarchy,
             copy_textures=s.copy_textures,
             export_geometry=s.export_geometry,
@@ -61,6 +64,7 @@ class ExportOptions:
             export_animation=s.export_animation,
             frame_start=s.frame_start,
             frame_end=s.frame_end,
+            export_mode=s.export_mode,
         )
 
 
@@ -94,10 +98,10 @@ def generate_bbox(meshes):
 # Chunk data builders
 # ============================================================================
 
-def create_mesh_data(mesh, vert, index, name, mname, bone_link=-1):
+def create_mesh_data(mesh, vert, index, name, mname, bone_link=-1, mode=1):
     buf = BytesIO()
     buf.write(struct.pack("<i", index))
-    buf.write(struct.pack("<i", 1))  # mode
+    buf.write(struct.pack("<i", mode))  # mode: 1 = skinned blended, 2 = skinned non-blended
     buf.write(struct.pack("<i", len(vert)))
     buf.write(struct.pack("<6f", *generate_bbox([mesh])))
     buf.write(struct.pack("<i", bone_link))
@@ -136,19 +140,19 @@ def create_face_data(verts, faces, meshindex):
     return buf.getvalue()
 
 
-def create_tang_data(tang, meshindex):
+def create_tang_data(tang, meshindex, channel=0):
     buf = BytesIO()
     buf.write(struct.pack("<i", meshindex))
-    buf.write(struct.pack("<i", 0))
+    buf.write(struct.pack("<i", channel))
     for t in tang:
         buf.write(struct.pack('<3f', *list(t)))
     return buf.getvalue()
 
 
-def create_texc_data(texc, meshindex):
+def create_texc_data(texc, meshindex, channel=0):
     buf = BytesIO()
     buf.write(struct.pack("<i", meshindex))
-    buf.write(struct.pack("<i", 0))
+    buf.write(struct.pack("<i", channel))
     for t in texc:
         buf.write(struct.pack("<2f", t[0], 1.0 - t[1]))
     return buf.getvalue()
@@ -181,6 +185,17 @@ def create_lnk1_data(lnk1, meshindex, bone_indices):
         if count > 0:
             buf.write(struct.pack(f'<{count}f', *[inf[1] for inf in influences]))
             buf.write(struct.pack(f'<{count}I', *[bone_indices[inf[0]] for inf in influences]))
+    return buf.getvalue()
+
+
+def create_lnk2_data(lnk2, meshindex, bone_index):
+    """Create single link data (lnk2) - one bone per vertex."""
+    buf = BytesIO()
+    buf.write(struct.pack("<i", meshindex))
+    buf.write(struct.pack("<i", len(lnk2)))
+    for bone_idx in lnk2:
+        buf.write(struct.pack("<i", bone_idx))
+        buf.write(struct.pack("<i", bone_index))
     return buf.getvalue()
 
 
@@ -551,28 +566,44 @@ def export_k2_mesh(filename, opts=None):
 
     meshes = []
     mesh_objs = []
+    sprites = []
+    sprite_objs = []
     armature = None
     arm_matrix = None
 
     for obj in bpy.context.selected_objects:
         if obj.type == 'MESH':
             mesh_type = _get_mesh_type(obj)
-            if mesh_type in ('REFBONE', 'SPRITE', 'GROUND'):
-                vlog(f"Skipping non-geometry mesh '{obj.name}' (type={mesh_type})")
+            if mesh_type == 'REFBONE':
+                vlog(f"Skipping reference bone '{obj.name}'")
                 continue
-
-            matrix = obj.matrix_world
-            if opts.apply_modifiers:
-                depsgraph = bpy.context.evaluated_depsgraph_get()
-                me = obj.evaluated_get(depsgraph).to_mesh()
-            else:
-                me = obj.data
-            bm = bmesh.new()
-            bm.from_mesh(me)
-            bmesh.ops.triangulate(bm, faces=bm.faces[:])
-            bm.transform(matrix)
-            meshes.append((obj, bm, mesh_type))
-            mesh_objs.append(obj)
+            elif mesh_type in ('SPRITE', 'GROUND'):
+                # Handle sprite/ground plane
+                matrix = obj.matrix_world
+                if opts.apply_modifiers:
+                    depsgraph = bpy.context.evaluated_depsgraph_get()
+                    me = obj.evaluated_get(depsgraph).to_mesh()
+                else:
+                    me = obj.data
+                bm = bmesh.new()
+                bm.from_mesh(me)
+                bmesh.ops.triangulate(bm, faces=bm.faces[:])
+                bm.transform(matrix)
+                sprites.append((obj, bm, mesh_type))
+                sprite_objs.append(obj)
+            elif mesh_type in ('NORMAL', 'COLLISION'):
+                matrix = obj.matrix_world
+                if opts.apply_modifiers:
+                    depsgraph = bpy.context.evaluated_depsgraph_get()
+                    me = obj.evaluated_get(depsgraph).to_mesh()
+                else:
+                    me = obj.data
+                bm = bmesh.new()
+                bm.from_mesh(me)
+                bmesh.ops.triangulate(bm, faces=bm.faces[:])
+                bm.transform(matrix)
+                meshes.append((obj, bm, mesh_type))
+                mesh_objs.append(obj)
         elif obj.type == 'ARMATURE':
             armature = obj.data
             arm_matrix = obj.matrix_world
@@ -594,12 +625,13 @@ def export_k2_mesh(filename, opts=None):
 
     num_normal_meshes = sum(1 for _, _, mt in meshes if mt == 'NORMAL')
     num_surfs = sum(1 for _, _, mt in meshes if mt == 'COLLISION')
+    num_sprites = len(sprites)
 
     # Build header
     headdata = BytesIO()
     headdata.write(struct.pack("<i", 3))  # version
     headdata.write(struct.pack("<i", num_normal_meshes))
-    headdata.write(struct.pack("<i", 0))  # sprites
+    headdata.write(struct.pack("<i", num_sprites))  # sprites
     headdata.write(struct.pack("<i", num_surfs))
     headdata.write(struct.pack("<i", len(armature.bones) if use_armature else 0))
     all_bm = [bm for _, bm, _ in meshes]
@@ -687,26 +719,90 @@ def export_k2_mesh(filename, opts=None):
             else:
                 mat_name = obj.name.encode('utf8')
 
+            # Determine mesh mode and bone link
+            # Check if mesh has blended weights (multiple bones per vertex)
+            has_blended_weights = False
+            if flnk1:
+                for influences in flnk1:
+                    if len(influences) > 1:
+                        has_blended_weights = True
+                        break
+
+            # Get bone_link from mesh settings (single bone link)
+            bone_link = -1
+            mesh_mode = 2  # Default to non-blended (mode 2)
+            if hasattr(obj, 'k2_mesh_settings'):
+                # Check if mesh is linked to a specific bone
+                for group in obj.vertex_groups:
+                    if group.name in bone_names:
+                        bone_link = bone_names.index(group.name)
+                        break
+
+            # Set mode based on weights
+            if has_blended_weights:
+                mesh_mode = 1  # MESH_SKINNED_BLENDED
+
             write_block(file, 'mesh', create_mesh_data(
-                mesh, vert, meshindex, obj.name.encode('utf8'), mat_name))
+                mesh, vert, meshindex, obj.name.encode('utf8'), mat_name,
+                bone_link=bone_link, mode=mesh_mode))
             write_block(file, 'vrts', create_vrts_data(vert, meshindex))
 
+            # Write link data based on mode
             if use_armature and flnk1:
                 bone_indices_map = {}
                 for group in obj.vertex_groups:
                     if group.name in bone_names:
                         bone_indices_map[group.index] = bone_names.index(group.name)
-                write_block(file, 'lnk1', create_lnk1_data(flnk1, meshindex, bone_indices_map))
+
+                if has_blended_weights:
+                    # Mode 1: MESH_SKINNED_BLENDED - use lnk1
+                    write_block(file, 'lnk1', create_lnk1_data(flnk1, meshindex, bone_indices_map))
+                elif bone_link >= 0:
+                    # Mode 2: MESH_SKINNED_NONBLENDED with bonelink - use lnk2
+                    lnk2_indices = [bone_link] * len(vert)
+                    write_block(file, 'lnk2', create_lnk2_data(lnk2_indices, meshindex, bone_link))
 
             if faces:
                 write_block(file, 'face', create_face_data(vert, faces, meshindex))
                 if has_uv and texc is not None:
-                    write_block(file, "texc", create_texc_data(texc, meshindex))
+                    # Write UV channel 0 data (required)
+                    write_block(file, "texc", create_texc_data(texc, meshindex, channel=0))
                     for i in range(len(tang_data)):
                         if sign[i] == 0:
                             tang_data[i] = -(tang_data[i].copy())
-                    write_block(file, "tang", create_tang_data(tang_data, meshindex))
+                    write_block(file, "tang", create_tang_data(tang_data, meshindex, channel=0))
                     write_block(file, "sign", create_sign_data(meshindex, sign))
+
+                    # Write additional UV channels if available (up to 8)
+                    uv_layers = mesh.loops.layers.uv
+                    if len(uv_layers) > 1:
+                        for channel_idx in range(1, min(len(uv_layers), 8)):
+                            uv_lay = uv_layers[channel_idx]
+                            ftexc_ch = []
+                            ftang_ch = []
+
+                            for f in mesh.faces:
+                                uv_ch = []
+                                tang_ch = []
+                                for loop in f.loops:
+                                    uv_ch.append(loop[uv_lay].uv)
+                                    tang_ch.append(loop.calc_tangent())
+                                ftexc_ch.append(uv_ch)
+                                ftang_ch.append(tang_ch)
+
+                            texc_ch = face_to_vertices(faces, ftexc_ch, vert)
+                            tang_ch_data = face_to_vertices(faces, ftang_ch, vert)
+
+                            fsign_ch = calc_face_signs(ftexc_ch)
+                            sign_ch = face_to_vertices(faces, fsign_ch, vert)
+
+                            write_block(file, "texc", create_texc_data(texc_ch, meshindex, channel=channel_idx))
+                            for i in range(len(tang_ch_data)):
+                                if tang_ch_data[i] is not None:
+                                    tang_ch_data[i] = tang_ch_data[i] - vert[i].normal * tang_ch_data[i].dot(vert[i].normal)
+                                    tang_ch_data[i].normalize()
+                            write_block(file, "tang", create_tang_data(tang_ch_data, meshindex, channel=channel_idx))
+
                 if not exclude_nrml:
                     write_block(file, "nrml", create_nrml_data(vert, meshindex))
             if colr is not None:
@@ -715,10 +811,52 @@ def export_k2_mesh(filename, opts=None):
             vlog(f'Mesh {meshindex} ({obj.name}): {len(vert) - len(mesh.verts)} verts duplicated')
             meshindex += 1
 
-    if opts.copy_textures and export_dir:
-        _copy_textures(mesh_objs, export_dir)
+    # Export sprites
+    if sprites:
+        log(f"Exporting {len(sprites)} sprite(s): {[obj.name for obj, _, _ in sprites]}")
+        for obj, mesh, sprite_type in sprites:
+            vert = list(mesh.verts)
+            faces = list(mesh.faces)
 
-    log(f"Exported {len(meshes)} mesh(es) to {filename}")
+            # Get bounding box
+            bbox = generate_bbox([mesh])
+
+            # Sprite mode: 3 = billboard, 4 = ground plane
+            sprite_mode = 3 if sprite_type == 'SPRITE' else 4
+
+            if obj.data.materials:
+                mat = obj.data.materials[0]
+                mat_name = mat.name.encode('utf8')
+            else:
+                mat_name = obj.name.encode('utf8')
+
+            # Write sprite mesh block (similar to normal mesh but with different mode)
+            sprite_mesh_data = BytesIO()
+            sprite_mesh_data.write(struct.pack("<i", 0))  # sprite index starts at 0
+            sprite_mesh_data.write(struct.pack("<i", sprite_mode))  # mode: 3=billboard, 4=ground
+            sprite_mesh_data.write(struct.pack("<i", len(vert)))
+            sprite_mesh_data.write(struct.pack("<6f", *bbox))
+            sprite_mesh_data.write(struct.pack("<i", -1))  # bone link
+            sprite_mesh_data.write(struct.pack("<B", len(obj.name.encode('utf8'))))
+            sprite_mesh_data.write(struct.pack("<B", len(mat_name)))
+            sprite_mesh_data.write(obj.name.encode('utf8'))
+            sprite_mesh_data.write(struct.pack("<B", 0))
+            sprite_mesh_data.write(mat_name)
+            sprite_mesh_data.write(struct.pack("<B", 0))
+
+            write_block(file, 'mesh', sprite_mesh_data.getvalue())
+
+            # Write vertices
+            write_block(file, 'vrts', create_vrts_data(vert, 0))
+
+            # Write faces
+            if faces:
+                write_block(file, 'face', create_face_data(vert, faces, 0))
+
+    if opts.copy_textures and export_dir:
+        _copy_textures(mesh_objs + sprite_objs, export_dir)
+
+    log(f"Exported {len(meshes)} mesh(es), {len(sprites)} sprite(s) to {filename}")
 
 
 # ============================================================================

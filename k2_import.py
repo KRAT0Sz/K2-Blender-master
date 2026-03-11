@@ -52,6 +52,28 @@ def parse_links(honchunk, bone_names):
     return vgroups
 
 
+def parse_links_single(honchunk, bone_names):
+    """Parse single link data (lnk2) - one bone per vertex."""
+    mesh_index = read_int(honchunk)
+    numverts = read_int(honchunk)
+    log("Parsing single links (lnk2)")
+    vlog(f"Mesh index: {mesh_index}")
+    vlog(f"Number of vertices: {numverts}")
+
+    vgroups = {}
+    for i in range(numverts):
+        vertex_bone = read_int(honchunk)
+        bone_index = read_int(honchunk)
+        if bone_index >= 0 and bone_index < len(bone_names):
+            name = bone_names[bone_index]
+            if name not in vgroups:
+                vgroups[name] = []
+            vgroups[name].append((i, 1.0))
+
+    honchunk.skip()
+    return vgroups
+
+
 def parse_vertices(honchunk):
     vlog('Parsing vertices chunk')
     numverts = int((honchunk.chunksize - 4) / 12)
@@ -177,6 +199,8 @@ def _read_mesh_subchunks(file, version, bone_names):
             colors = parse_colr(honchunk)
         elif name in (b'lnk1', b'lnk3'):
             vgroups = parse_links(honchunk, bone_names)
+        elif name == b'lnk2':
+            vgroups = parse_links_single(honchunk, bone_names)
         elif name == b'sign':
             signs = parse_sign(honchunk)
         else:
@@ -707,8 +731,26 @@ def create_blender_mesh(filename, objname, flipuv, tex_flags=None):
 
                     honchunk.skip()
 
-                    if mode != 1:
-                        # Skip non-standard mesh modes entirely
+                    if mode == 3 or mode == 4:
+                        # Sprite modes: 3=billboard, 4=ground plane
+                        sprite_type = 'SPRITE' if mode == 3 else 'GROUND'
+                        vlog(f"Importing sprite: {meshname} (type={sprite_type})")
+
+                        # Read sprite mesh data
+                        verts, faces, signs, nrml, texc, colors, vgroups, honchunk = \
+                            _read_mesh_subchunks(file, version, bone_names)
+
+                        obj = _build_mesh_object(
+                            scn, meshname, materialname, verts, faces, texc, flipuv,
+                            {}, -1, bone_names, rig, is_surf=False,
+                            model_dir=model_dir, tex_flags=tex_flags,
+                        )
+                        # Mark as sprite for identification
+                        if hasattr(obj, 'k2_mesh_settings'):
+                            obj.k2_mesh_settings.mesh_type = sprite_type
+
+                    elif mode != 1:
+                        # Skip other non-standard mesh modes
                         while True:
                             try:
                                 honchunk = chunk.Chunk(file, bigendian=False, align=False)

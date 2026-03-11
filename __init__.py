@@ -37,9 +37,34 @@ class K2ImportSettings(bpy.types.PropertyGroup):
         description="Flip UV coordinates",
         default=True,
     )
-    import_textures: BoolProperty(
-        name="Import Textures",
-        description="Auto-detect and load textures (color, normal, MRAO, emissive) from model directory",
+    tex_color: BoolProperty(
+        name="Color",
+        description="Import color/diffuse/albedo texture",
+        default=True,
+    )
+    tex_color2: BoolProperty(
+        name="Color 2",
+        description="Import secondary color texture (team color / tint)",
+        default=False,
+    )
+    tex_color3: BoolProperty(
+        name="Color 3",
+        description="Import tertiary color texture (detail / specular)",
+        default=False,
+    )
+    tex_normal: BoolProperty(
+        name="Normal",
+        description="Import normal map texture",
+        default=True,
+    )
+    tex_mrao: BoolProperty(
+        name="MRAO",
+        description="Import MRAO (Metallic/Roughness/AO) texture",
+        default=True,
+    )
+    tex_emissive: BoolProperty(
+        name="Emissive",
+        description="Import emissive/glow texture",
         default=True,
     )
 
@@ -136,7 +161,15 @@ class K2Importer(bpy.types.Operator):
     def execute(self, context):
         from . import k2_import
         settings = context.scene.k2_import_settings
-        k2_import.read(self.filepath, settings.flip_uv, settings.import_textures)
+        tex_flags = {
+            'color': settings.tex_color,
+            'color2': settings.tex_color2,
+            'color3': settings.tex_color3,
+            'normal': settings.tex_normal,
+            'mrao': settings.tex_mrao,
+            'emissive': settings.tex_emissive,
+        }
+        k2_import.read(self.filepath, settings.flip_uv, tex_flags)
 
         from .k2_common import view_all_in_3d_view
         if not view_all_in_3d_view():
@@ -160,6 +193,45 @@ class K2ImporterClip(bpy.types.Operator):
     def execute(self, context):
         from . import k2_import
         k2_import.readclip(self.filepath)
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+
+class K2_OT_ImportTextures(bpy.types.Operator):
+    """Select any texture file — all textures in that folder will be matched to materials"""
+    bl_idname = "k2.import_textures"
+    bl_label = "Import Textures"
+
+    filepath: StringProperty(subtype='FILE_PATH')
+    filter_glob: StringProperty(
+        default="*.tga;*.png;*.dds;*.jpg;*.jpeg;*.bmp;*.tif",
+        options={'HIDDEN'},
+    )
+
+    def execute(self, context):
+        import os
+        from .k2_import import assign_textures_to_objects
+        tex_dir = os.path.dirname(os.path.abspath(self.filepath))
+        settings = context.scene.k2_import_settings
+        tex_flags = {
+            'color': settings.tex_color,
+            'color2': settings.tex_color2,
+            'color3': settings.tex_color3,
+            'normal': settings.tex_normal,
+            'mrao': settings.tex_mrao,
+            'emissive': settings.tex_emissive,
+        }
+        objects = [o for o in context.selected_objects if o.type == 'MESH']
+        if not objects:
+            objects = [o for o in context.scene.objects if o.type == 'MESH']
+        count = assign_textures_to_objects(objects, tex_dir, tex_flags)
+        if count:
+            self.report({'INFO'}, f"Loaded textures for {count} material(s) from {tex_dir}")
+        else:
+            self.report({'WARNING'}, f"No matching textures found in {tex_dir}")
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -442,9 +514,19 @@ class K2_PT_ImportPanel(bpy.types.Panel):
         row.operator("import_mesh.k2", text="Mesh")
         row.operator("import_clip.k2", text="Clip")
 
-        col = layout.column(align=True)
-        col.prop(settings, "flip_uv")
-        col.prop(settings, "import_textures")
+        layout.prop(settings, "flip_uv")
+
+        box = layout.box()
+        box.label(text="Textures", icon='TEXTURE')
+        col = box.column(align=True)
+        col.prop(settings, "tex_color")
+        col.prop(settings, "tex_color2")
+        col.prop(settings, "tex_color3")
+        col.prop(settings, "tex_normal")
+        col.prop(settings, "tex_mrao")
+        col.prop(settings, "tex_emissive")
+        box.separator()
+        box.operator("k2.import_textures", text="Import Textures", icon='IMPORT')
 
 
 class K2_PT_ArmaturePanel(bpy.types.Panel):
@@ -559,6 +641,7 @@ _classes = (
     K2MeshSettings,
     K2Importer,
     K2ImporterClip,
+    K2_OT_ImportTextures,
     K2MeshExporter,
     K2ClipExporter,
     K2_OT_SceneInfo,

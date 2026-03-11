@@ -98,12 +98,16 @@ def parse_normals(honchunk):
 
 def parse_texc(honchunk, version):
     vlog('Parsing UV texc chunk')
-    numverts = int((honchunk.chunksize - 4) / 8)
-    vlog(f'{numverts} texc')
     meshindex = read_int(honchunk)
+    uv_channel = 0
     if version == 3:
-        read_int(honchunk)  # unknown field
-    return [struct.unpack("<2f", honchunk.read(8)) for _ in range(numverts)]
+        uv_channel = read_int(honchunk)
+        numverts = (honchunk.chunksize - 8) // 8
+    else:
+        numverts = (honchunk.chunksize - 4) // 8
+    vlog(f'{numverts} texc (channel {uv_channel})')
+    uvs = [struct.unpack("<2f", honchunk.read(8)) for _ in range(numverts)]
+    return uv_channel, uvs
 
 
 def parse_colr(honchunk):
@@ -164,18 +168,21 @@ def _read_mesh_subchunks(file, version, bone_names):
         elif name == b'nrml':
             nrml = parse_normals(honchunk)
         elif name == b'texc':
-            texc = parse_texc(honchunk, version)
+            channel, uvs = parse_texc(honchunk, version)
+            if channel == 0 or not texc:
+                texc = uvs
+            else:
+                vlog(f'Skipping UV channel {channel} (using channel 0)')
         elif name == b'colr':
             colors = parse_colr(honchunk)
         elif name in (b'lnk1', b'lnk3'):
             vgroups = parse_links(honchunk, bone_names)
         elif name == b'sign':
             signs = parse_sign(honchunk)
-        elif name == b'tang':
-            honchunk.skip()
         else:
-            vlog(f'Unknown chunk: {name}')
-            honchunk.skip()
+            vlog(f'Skipping chunk: {name}')
+
+        honchunk.skip()
 
 
 # ============================================================================
@@ -272,9 +279,9 @@ def _read_mesh_header_v3(honchunk):
     vlog(f"Bone link: {bone_link}")
     sizename = struct.unpack('B', honchunk.read(1))[0]
     sizemat = struct.unpack('B', honchunk.read(1))[0]
-    meshname = honchunk.read(sizename).decode()
+    meshname = honchunk.read(sizename).decode().rstrip('\x00')
     honchunk.read(1)  # null terminator
-    materialname = honchunk.read(sizemat).decode()
+    materialname = honchunk.read(sizemat).decode().rstrip('\x00')
     return mode, bone_link, meshname, materialname
 
 
@@ -302,109 +309,259 @@ def _read_mesh_header_v1(honchunk):
 import os
 import glob as _glob
 
-_TEX_SUFFIXES = {
-    'color':    ['_color', '_diff', '_diffuse', '_albedo', ''],
-    'normal':   ['_normal', '_nrm', '_norm', '_n'],
-    'mrao':     ['_mrao', '_orm', '_ao_rough_metal'],
+_TEX_KEYWORDS = {
+    'color2':   ['_color2', '_diff2', '_team', '_tint'],
+    'color3':   ['_color3', '_diff3', '_detail', '_spec', '_specular'],
+    'color':    ['_color', '_diff', '_diffuse', '_albedo'],
+    'normal':   ['_normal', '_nrm', '_norm'],
+    'mrao':     ['_mrao', '_orm'],
     'emissive': ['_emissive', '_emis', '_glow', '_self'],
 }
-_TEX_EXTENSIONS = ['.tga', '.png', '.dds', '.jpg', '.jpeg', '.bmp', '.tif']
+_EXT_PRIORITY = ['.tga', '.png', '.jpg', '.jpeg', '.bmp', '.tif', '.dds']
+_TEX_EXTENSIONS = set(_EXT_PRIORITY)
+
+_dir_cache = {}
 
 
-def _find_texture(base_dir, mat_name, tex_type):
-    """Search for a texture file matching the material name and texture type."""
-    for suffix in _TEX_SUFFIXES.get(tex_type, []):
-        for ext in _TEX_EXTENSIONS:
-            candidates = [
-                os.path.join(base_dir, f"{mat_name}{suffix}{ext}"),
-                os.path.join(base_dir, f"{mat_name}{suffix}{ext}".lower()),
-            ]
-            for path in candidates:
-                matches = _glob.glob(path)
-                if matches:
-                    return matches[0]
+def _scan_texture_dir(base_dir):
+    """Scan a directory and build {prefix: {type: filepath}} preferring .tga over .dds."""
+    if base_dir in _dir_cache:
+        return _dir_cache[base_dir]
+
+    result = {}
+    try:
+        files = os.listdir(base_dir)
+    except OSError:
+        _dir_cache[base_dir] = result
+        return result
+
+    for f in files:
+        name_lower = f.lower()
+        stem, ext = os.path.splitext(name_lower)
+        if ext not in _TEX_EXTENSIONS:
+            continue
+
+        matched_type = None
+        prefix = stem
+        for tex_type, keywords in _TEX_KEYWORDS.items():
+            for kw in keywords:
+                pos = stem.find(kw)
+                if pos > 0:
+                    matched_type = tex_type
+                    prefix = stem[:pos]
+                    break
+            if matched_type:
+                break
+
+        if not matched_type:
+            matched_type = 'color'
+            prefix = stem
+
+        if prefix not in result:
+            result[prefix] = {}
+        existing = result[prefix].get(matched_type)
+        if existing:
+            _, old_ext = os.path.splitext(existing.lower())
+            old_pri = _EXT_PRIORITY.index(old_ext) if old_ext in _EXT_PRIORITY else 99
+            new_pri = _EXT_PRIORITY.index(ext) if ext in _EXT_PRIORITY else 99
+            if new_pri >= old_pri:
+                continue
+        result[prefix][matched_type] = os.path.join(base_dir, f)
+
+    _dir_cache[base_dir] = result
+    return result
+
+
+def _match_prefix(tex_map, mat_name):
+    """Find the best matching texture prefix for a material name."""
+    mat_lower = mat_name.lower()
+    mat_base = mat_lower.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+    # Strip trailing .001 etc from Blender material duplicates
+    if '.' in mat_base:
+        parts = mat_base.rsplit('.', 1)
+        if parts[1].isdigit():
+            mat_base = parts[0]
+
+    if mat_base in tex_map:
+        return mat_base
+
+    for prefix in tex_map:
+        if prefix.startswith(mat_base) or mat_base.startswith(prefix):
+            return prefix
+
+    for prefix in tex_map:
+        if mat_base in prefix or prefix in mat_base:
+            return prefix
+
     return None
 
 
-def _setup_material_textures(mat, model_dir, mat_name):
-    """Set up Principled BSDF with auto-detected texture maps."""
+def _find_texture(base_dir, mat_name, tex_type):
+    """Find a texture file in base_dir matching the material name and texture type."""
+    tex_map = _scan_texture_dir(base_dir)
+    prefix = _match_prefix(tex_map, mat_name)
+    if prefix and tex_type in tex_map[prefix]:
+        path = tex_map[prefix][tex_type]
+        vlog(f"    Found {tex_type}: {os.path.basename(path)} (prefix='{prefix}')")
+        return path
+    return None
+
+
+def assign_textures_to_objects(objects, tex_dir, tex_flags):
+    """
+    Smart texture assignment: match by material name first,
+    then fall back to auto-assigning texture groups by order.
+    Returns number of materials that got textures.
+    """
+    _dir_cache.pop(tex_dir, None)
+    tex_map = _scan_texture_dir(tex_dir)
+    if not tex_map:
+        log(f"No texture files found in {tex_dir}")
+        return 0
+
+    prefixes = sorted(tex_map.keys())
+    log(f"Texture groups found: {prefixes}")
+
+    materials = []
+    for obj in objects:
+        if obj.type != 'MESH' or not obj.data.materials:
+            continue
+        for mat in obj.data.materials:
+            if mat and mat not in materials:
+                materials.append(mat)
+
+    if not materials:
+        log("No materials on selected objects")
+        return 0
+
+    log(f"Materials to assign: {[m.name for m in materials]}")
+
+    assignments = {}
+    used_prefixes = set()
+    for mat in materials:
+        prefix = _match_prefix(tex_map, mat.name)
+        if prefix:
+            assignments[mat.name] = prefix
+            used_prefixes.add(prefix)
+            log(f"  '{mat.name}' -> '{prefix}' (name match)")
+
+    unmatched_mats = [m for m in materials if m.name not in assignments]
+    remaining_prefixes = [p for p in prefixes if p not in used_prefixes]
+
+    if unmatched_mats and remaining_prefixes:
+        for mat, prefix in zip(unmatched_mats, remaining_prefixes):
+            assignments[mat.name] = prefix
+            log(f"  '{mat.name}' -> '{prefix}' (auto-assigned)")
+
+    count = 0
+    for mat in materials:
+        prefix = assignments.get(mat.name)
+        if not prefix:
+            log(f"  '{mat.name}' -> no texture group available")
+            continue
+        if _setup_material_from_prefix(mat, tex_map[prefix], tex_flags):
+            count += 1
+
+    return count
+
+
+def _setup_material_from_prefix(mat, type_map, tex_flags):
+    """Set up Principled BSDF for a material using a pre-resolved texture type map."""
+    if tex_flags is None or tex_flags is True:
+        tex_flags = {k: True for k in _TEX_KEYWORDS}
+    if not any(tex_flags.values()):
+        return False
+
     mat.use_nodes = True
     tree = mat.node_tree
     tree.nodes.clear()
 
     output = tree.nodes.new('ShaderNodeOutputMaterial')
     output.location = (600, 0)
-
     bsdf = tree.nodes.new('ShaderNodeBsdfPrincipled')
     bsdf.location = (200, 0)
     tree.links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
 
-    x_offset = -600
-    y_pos = 400
-    any_loaded = False
+    x_off = -600
+    y = 400
+    loaded = False
 
-    color_path = _find_texture(model_dir, mat_name, 'color')
-    if color_path:
+    if tex_flags.get('color') and 'color' in type_map:
         tex = tree.nodes.new('ShaderNodeTexImage')
-        tex.location = (x_offset, y_pos)
+        tex.location = (x_off, y)
         tex.label = "Color"
-        tex.image = bpy.data.images.load(color_path, check_existing=True)
+        tex.image = bpy.data.images.load(type_map['color'], check_existing=True)
         tree.links.new(tex.outputs['Color'], bsdf.inputs['Base Color'])
         tree.links.new(tex.outputs['Alpha'], bsdf.inputs['Alpha'])
-        mat.blend_method = 'CLIP' if tex.image.depth == 32 else 'OPAQUE'
-        vlog(f"  Color texture: {os.path.basename(color_path)}")
-        y_pos -= 300
-        any_loaded = True
+        y -= 300
+        loaded = True
 
-    normal_path = _find_texture(model_dir, mat_name, 'normal')
-    if normal_path:
+    for ckey, clabel in [('color2', 'Color 2'), ('color3', 'Color 3')]:
+        if tex_flags.get(ckey) and ckey in type_map:
+            tex = tree.nodes.new('ShaderNodeTexImage')
+            tex.location = (x_off, y)
+            tex.label = clabel
+            tex.image = bpy.data.images.load(type_map[ckey], check_existing=True)
+            y -= 300
+            loaded = True
+
+    if tex_flags.get('normal') and 'normal' in type_map:
         tex = tree.nodes.new('ShaderNodeTexImage')
-        tex.location = (x_offset, y_pos)
+        tex.location = (x_off, y)
         tex.label = "Normal"
-        tex.image = bpy.data.images.load(normal_path, check_existing=True)
+        tex.image = bpy.data.images.load(type_map['normal'], check_existing=True)
         tex.image.colorspace_settings.name = 'Non-Color'
         nmap = tree.nodes.new('ShaderNodeNormalMap')
-        nmap.location = (x_offset + 300, y_pos)
+        nmap.location = (x_off + 300, y)
         tree.links.new(tex.outputs['Color'], nmap.inputs['Color'])
         tree.links.new(nmap.outputs['Normal'], bsdf.inputs['Normal'])
-        vlog(f"  Normal texture: {os.path.basename(normal_path)}")
-        y_pos -= 300
-        any_loaded = True
+        y -= 300
+        loaded = True
 
-    mrao_path = _find_texture(model_dir, mat_name, 'mrao')
-    if mrao_path:
+    if tex_flags.get('mrao') and 'mrao' in type_map:
         tex = tree.nodes.new('ShaderNodeTexImage')
-        tex.location = (x_offset, y_pos)
+        tex.location = (x_off, y)
         tex.label = "MRAO"
-        tex.image = bpy.data.images.load(mrao_path, check_existing=True)
+        tex.image = bpy.data.images.load(type_map['mrao'], check_existing=True)
         tex.image.colorspace_settings.name = 'Non-Color'
-
         sep = tree.nodes.new('ShaderNodeSeparateColor')
-        sep.location = (x_offset + 300, y_pos)
+        sep.location = (x_off + 300, y)
         tree.links.new(tex.outputs['Color'], sep.inputs['Color'])
-
         tree.links.new(sep.outputs['Red'], bsdf.inputs['Metallic'])
         tree.links.new(sep.outputs['Green'], bsdf.inputs['Roughness'])
+        y -= 300
+        loaded = True
 
-        vlog(f"  MRAO texture: {os.path.basename(mrao_path)}")
-        y_pos -= 300
-        any_loaded = True
-
-    emissive_path = _find_texture(model_dir, mat_name, 'emissive')
-    if emissive_path:
+    if tex_flags.get('emissive') and 'emissive' in type_map:
         tex = tree.nodes.new('ShaderNodeTexImage')
-        tex.location = (x_offset, y_pos)
+        tex.location = (x_off, y)
         tex.label = "Emissive"
-        tex.image = bpy.data.images.load(emissive_path, check_existing=True)
+        tex.image = bpy.data.images.load(type_map['emissive'], check_existing=True)
         tree.links.new(tex.outputs['Color'], bsdf.inputs['Emission Color'])
         bsdf.inputs['Emission Strength'].default_value = 1.0
-        vlog(f"  Emissive texture: {os.path.basename(emissive_path)}")
-        any_loaded = True
+        loaded = True
 
-    if not any_loaded:
-        vlog(f"  No textures found for material '{mat_name}' in {model_dir}")
+    return loaded
 
-    return any_loaded
+
+def _setup_material_textures(mat, model_dir, mat_name, tex_flags=None):
+    """Set up Principled BSDF with auto-detected texture maps (used during mesh import)."""
+    if tex_flags is False:
+        return False
+    if tex_flags is None or tex_flags is True:
+        tex_flags = {k: True for k in _TEX_KEYWORDS}
+    if not any(tex_flags.values()):
+        return False
+
+    tex_map = _scan_texture_dir(model_dir)
+    prefix = _match_prefix(tex_map, mat_name)
+    log(f"Searching textures for material '{mat_name}' in {model_dir}")
+    log(f"  Available prefixes: {list(tex_map.keys())}")
+    if prefix:
+        log(f"  Matched prefix: '{prefix}' -> types: {list(tex_map[prefix].keys())}")
+        return _setup_material_from_prefix(mat, tex_map[prefix], tex_flags)
+    log(f"  No matching prefix found for '{mat_name}'")
+    return False
 
 
 # ============================================================================
@@ -413,7 +570,7 @@ def _setup_material_textures(mat, model_dir, mat_name):
 
 def _build_mesh_object(scn, meshname, materialname, verts, faces, texc, flipuv,
                        vgroups, bone_link, bone_names, rig, is_surf,
-                       model_dir='', import_textures=True):
+                       model_dir='', tex_flags=None):
     """Create a Blender mesh object with UVs, vertex groups, and armature modifier."""
     msh = bpy.data.meshes.new(name=meshname)
     msh.from_pydata(verts, [], faces)
@@ -422,8 +579,8 @@ def _build_mesh_object(scn, meshname, materialname, verts, faces, texc, flipuv,
     if materialname:
         mat = bpy.data.materials.new(materialname)
         msh.materials.append(mat)
-        if import_textures and model_dir:
-            _setup_material_textures(mat, model_dir, materialname)
+        if model_dir and tex_flags:
+            _setup_material_textures(mat, model_dir, materialname, tex_flags)
 
     if texc:
         if flipuv:
@@ -470,7 +627,7 @@ def _build_mesh_object(scn, meshname, materialname, verts, faces, texc, flipuv,
 # Main mesh import
 # ============================================================================
 
-def create_blender_mesh(filename, objname, flipuv, import_textures=True):
+def create_blender_mesh(filename, objname, flipuv, tex_flags=None):
     """Import a K2 .model file into Blender."""
     model_dir = os.path.dirname(os.path.abspath(filename))
     try:
@@ -564,7 +721,7 @@ def create_blender_mesh(filename, objname, flipuv, import_textures=True):
                     obj = _build_mesh_object(
                         scn, meshname, materialname, verts, faces, texc, flipuv,
                         vgroups, bone_link, bone_names, rig, is_surf=False,
-                        model_dir=model_dir, import_textures=import_textures,
+                        model_dir=model_dir, tex_flags=tex_flags,
                     )
 
                 elif honchunk.getname() == b'surf':
@@ -577,7 +734,7 @@ def create_blender_mesh(filename, objname, flipuv, import_textures=True):
                     obj = _build_mesh_object(
                         scn, f'{objname}_surf', None, surf_points, surf_tris, [], flipuv,
                         {}, -1, bone_names, rig, is_surf=True,
-                        model_dir=model_dir, import_textures=False,
+                        model_dir=model_dir, tex_flags=None,
                     )
 
                     try:
@@ -736,6 +893,6 @@ def readclip(filepath):
     create_blender_clip(filepath, obj_name)
 
 
-def read(filepath, flipuv, import_textures=True):
+def read(filepath, flipuv, tex_flags=None):
     obj_name = bpy.path.display_name_from_filepath(filepath)
-    create_blender_mesh(filepath, obj_name, flipuv, import_textures=import_textures)
+    create_blender_mesh(filepath, obj_name, flipuv, tex_flags=tex_flags)

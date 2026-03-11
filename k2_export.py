@@ -31,7 +31,7 @@ class ExportOptions:
     """Plain data class to pass export settings from operators to export functions."""
     __slots__ = (
         'apply_modifiers', 'force_static', 'remove_hierarchy',
-        'copy_textures', 'export_geometry', 'export_materials',
+        'copy_textures', 'export_geometry', 'export_model_def', 'export_materials',
         'export_animation', 'frame_start', 'frame_end',
     )
 
@@ -41,6 +41,7 @@ class ExportOptions:
         self.remove_hierarchy = kw.get('remove_hierarchy', False)
         self.copy_textures = kw.get('copy_textures', True)
         self.export_geometry = kw.get('export_geometry', True)
+        self.export_model_def = kw.get('export_model_def', True)
         self.export_materials = kw.get('export_materials', True)
         self.export_animation = kw.get('export_animation', False)
         self.frame_start = kw.get('frame_start', 0)
@@ -55,6 +56,7 @@ class ExportOptions:
             remove_hierarchy=s.remove_hierarchy,
             copy_textures=s.copy_textures,
             export_geometry=s.export_geometry,
+            export_model_def=s.export_model_def,
             export_materials=s.export_materials,
             export_animation=s.export_animation,
             frame_start=s.frame_start,
@@ -306,6 +308,8 @@ def _select_objects_by_type(*types):
 def _copy_textures(meshes_objs, export_dir):
     """Copy texture files referenced by materials to the export directory."""
     copied = set()
+    textures_dir = os.path.join(export_dir, "textures")
+    os.makedirs(textures_dir, exist_ok=True)
     for obj in meshes_objs:
         for mat_slot in obj.material_slots:
             mat = mat_slot.material
@@ -316,13 +320,197 @@ def _copy_textures(meshes_objs, export_dir):
                     src = bpy.path.abspath(node.image.filepath)
                     if src in copied or not os.path.isfile(src):
                         continue
-                    dst = os.path.join(export_dir, os.path.basename(src))
+                    dst = os.path.join(textures_dir, os.path.basename(src))
                     try:
                         shutil.copy2(src, dst)
                         vlog(f"Copied texture: {os.path.basename(src)}")
                         copied.add(src)
                     except Exception as e:
                         log(f"Failed to copy texture {src}: {e}")
+
+
+def _collect_export_materials(mesh_objs):
+    """Return unique Blender materials used by exported meshes, preserving first-seen order."""
+    materials = []
+    seen = set()
+    for obj in mesh_objs:
+        for mat in obj.data.materials:
+            if not mat:
+                continue
+            key = mat.name_full
+            if key in seen:
+                continue
+            seen.add(key)
+            materials.append(mat)
+    return materials
+
+
+def _material_export_name(index):
+    return "material" if index == 0 else f"material{index + 1}"
+
+
+def _node_image_path(node):
+    if not node or node.type != 'TEX_IMAGE' or not node.image:
+        return None
+    image_path = bpy.path.abspath(node.image.filepath_raw or node.image.filepath)
+    if not image_path:
+        return None
+    return image_path.replace("\\", "/")
+
+
+def _looks_like_tex_type(text, tex_type):
+    text = (text or "").lower()
+    if tex_type == 'color':
+        return any(k in text for k in ('color', 'diff', 'diffuse', 'albedo'))
+    if tex_type == 'color2':
+        return any(k in text for k in ('color2', 'diff2', 'team', 'tint'))
+    if tex_type == 'color3':
+        return any(k in text for k in ('color3', 'diff3', 'detail', 'spec'))
+    if tex_type == 'normal':
+        return any(k in text for k in ('normal', 'norm', 'nrm'))
+    if tex_type == 'mrao':
+        return any(k in text for k in ('mrao', 'orm'))
+    if tex_type == 'emissive':
+        return any(k in text for k in ('emissive', 'emis', 'glow', 'self'))
+    return False
+
+
+def _resolve_material_textures(mat):
+    """
+    Infer texture roles from image texture nodes.
+    The importer labels nodes consistently, but we also fall back to filename matching.
+    """
+    textures = {}
+    if not mat or not mat.use_nodes or not mat.node_tree:
+        return textures
+
+    for node in mat.node_tree.nodes:
+        if node.type != 'TEX_IMAGE':
+            continue
+        image_path = _node_image_path(node)
+        if not image_path:
+            continue
+        filename = os.path.basename(image_path).lower()
+        label = (node.label or node.name or "").lower()
+        search_text = f"{label} {filename}"
+        for tex_type in ('color2', 'color3', 'color', 'normal', 'mrao', 'emissive'):
+            if tex_type in textures:
+                continue
+            if _looks_like_tex_type(search_text, tex_type):
+                textures[tex_type] = image_path
+                break
+
+    return textures
+
+
+def _to_export_relpath(path, export_dir):
+    if not path:
+        return None
+    path = bpy.path.abspath(path)
+    if export_dir:
+        try:
+            rel = os.path.relpath(path, export_dir)
+            return rel.replace("\\", "/")
+        except ValueError:
+            pass
+    return os.path.basename(path).replace("\\", "/")
+
+
+def _write_material_file(filepath, textures):
+    shader = "/shared/shaders/heroes/hero_diffuse_normal_mrao_team_emissive.shader"
+    diffuse = textures.get('color')
+    normal = textures.get('normal')
+    mrao = textures.get('mrao')
+    emissive = textures.get('emissive')
+    color3 = textures.get('color3')
+
+    glossiness = "64" if color3 else "32"
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<material>',
+        f'\t<parameters shader="{shader}" vDiffuseColor="1 1 1" fSpecularLevel="3.0" fGlossiness="{glossiness}" fOpacity="1.0" />',
+    ]
+
+    if diffuse:
+        lines.extend([
+            '\t<phase name="shadow" cull="back" blend="alphatest">',
+            f'\t\t<sampler name="diffuse" texture="{diffuse}" />',
+            '\t</phase>',
+            '\t<phase name="color" cull="back" blend="alphatest">',
+            f'\t\t<sampler name="diffuse" texture="{diffuse}" />',
+        ])
+        if normal:
+            lines.append(f'\t\t<sampler name="normalmap" texture="{normal}" />')
+        if mrao:
+            lines.append(f'\t\t<sampler name="mrao" texture="{mrao}" />')
+        if emissive:
+            lines.append(f'\t\t<sampler name="emissive" texture="{emissive}" />')
+        lines.extend([
+            '\t\t<samplercube name="cube" texture="/world/sky/deadlock/1.tga" />',
+            '\t</phase>',
+            '\t<phase name="fade" cull="back" colorwrite="false" alphawrite="false" depthwrite="true" blend="alphatest">',
+            f'\t\t<sampler name="diffuse" texture="{diffuse}" />',
+            '\t\t<multipass cull="back" blend="translucent">',
+            f'\t\t\t<sampler name="diffuse" texture="{diffuse}" />',
+        ])
+        if normal:
+            lines.append(f'\t\t\t<sampler name="normalmap" texture="{normal}" />')
+        if mrao:
+            lines.append(f'\t\t\t<sampler name="mrao" texture="{mrao}" />')
+        if emissive:
+            lines.append(f'\t\t\t<sampler name="emissive" texture="{emissive}" />')
+        lines.extend([
+            '\t\t\t<samplercube name="cube" texture="/world/sky/deadlock/1.tga" />',
+            '\t\t</multipass>',
+            '\t</phase>',
+        ])
+
+    lines.append('</material>')
+
+    with open(filepath, 'w', encoding='utf-8', newline='\n') as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def _write_model_def_file(filepath, model_filename):
+    model_name = os.path.basename(bpy.data.filepath) if bpy.data.filepath else os.path.basename(model_filename)
+    model_rel = os.path.basename(model_filename).replace("\\", "/")
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        f'<model name="{model_name}" file="{model_rel}" type="K2" high="{model_rel}" med="{model_rel}" low="{model_rel}" >',
+        '',
+        '</model>',
+    ]
+    with open(filepath, 'w', encoding='utf-8', newline='\n') as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def _export_companion_files(mesh_objs, export_dir, model_filename, write_materials=True,
+                            write_model_def=True, copy_textures=False):
+    """Write original-style companion .material and .mdf files next to the exported model."""
+    if not export_dir:
+        return
+
+    materials = _collect_export_materials(mesh_objs)
+    material_names = {}
+    for index, mat in enumerate(materials):
+        stem = _material_export_name(index)
+        material_names[mat.name_full] = stem
+        if not write_materials:
+            continue
+        textures = {}
+        for tex_type, path in _resolve_material_textures(mat).items():
+            tex_basename = os.path.basename(path).replace("\\", "/")
+            textures[tex_type] = (
+                f"textures/{tex_basename}"
+                if copy_textures else _to_export_relpath(path, export_dir)
+            )
+        _write_material_file(os.path.join(export_dir, f"{stem}.material"), textures)
+
+    if write_model_def:
+        model_stem = os.path.splitext(os.path.basename(model_filename))[0]
+        _write_model_def_file(os.path.join(export_dir, f"{model_stem}.mdf"), model_filename)
+
+    return material_names
 
 
 # ============================================================================
@@ -399,6 +587,11 @@ def export_k2_mesh(filename, opts=None):
             flatten_hierarchy=opts.remove_hierarchy,
         )
 
+    if not meshes:
+        log("WARNING: No mesh objects found in scene — exported model will contain only bones")
+    else:
+        log(f"Exporting {len(meshes)} mesh(es): {[obj.name for obj, _, _ in meshes]}")
+
     num_normal_meshes = sum(1 for _, _, mt in meshes if mt == 'NORMAL')
     num_surfs = sum(1 for _, _, mt in meshes if mt == 'COLLISION')
 
@@ -415,6 +608,15 @@ def export_k2_mesh(filename, opts=None):
     export_dir = os.path.dirname(filename)
     if export_dir:
         os.makedirs(export_dir, exist_ok=True)
+
+    material_names = _export_companion_files(
+        mesh_objs,
+        export_dir,
+        filename,
+        write_materials=opts.export_materials,
+        write_model_def=opts.export_model_def,
+        copy_textures=opts.copy_textures,
+    ) or {}
 
     with open(filename, 'wb') as file:
         file.write(b'SMDL')
@@ -478,8 +680,10 @@ def export_k2_mesh(filename, opts=None):
 
             colr = face_to_vertices(faces, fcolr, vert) if has_color else None
 
-            if obj.data.materials and opts.export_materials:
-                mat_name = obj.data.materials[0].name.encode('utf8')
+            if obj.data.materials:
+                mat = obj.data.materials[0]
+                mat_stub = material_names.get(mat.name_full)
+                mat_name = (mat_stub or mat.name).encode('utf8')
             else:
                 mat_name = obj.name.encode('utf8')
 

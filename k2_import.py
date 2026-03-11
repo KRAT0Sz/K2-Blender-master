@@ -465,6 +465,28 @@ def assign_textures_to_objects(objects, tex_dir, tex_flags):
     return count
 
 
+def _create_image_node(tree, image_path, label, x_pos, y_pos):
+    """Create an image texture node and compensate for Blender's upside-down DDS sampling."""
+    tex = tree.nodes.new('ShaderNodeTexImage')
+    tex.location = (x_pos, y_pos)
+    tex.label = label
+    tex.image = bpy.data.images.load(image_path, check_existing=True)
+
+    # Blender displays some DDS textures vertically flipped compared to TGA assets.
+    # Apply a per-node mapping correction so mesh UVs stay untouched.
+    if os.path.splitext(image_path)[1].lower() == '.dds':
+        texcoord = tree.nodes.new('ShaderNodeTexCoord')
+        texcoord.location = (x_pos - 600, y_pos)
+        mapping = tree.nodes.new('ShaderNodeMapping')
+        mapping.location = (x_pos - 320, y_pos)
+        mapping.inputs['Location'].default_value[1] = 1.0
+        mapping.inputs['Scale'].default_value[1] = -1.0
+        tree.links.new(texcoord.outputs['UV'], mapping.inputs['Vector'])
+        tree.links.new(mapping.outputs['Vector'], tex.inputs['Vector'])
+
+    return tex
+
+
 def _setup_material_from_prefix(mat, type_map, tex_flags):
     """Set up Principled BSDF for a material using a pre-resolved texture type map."""
     if tex_flags is None or tex_flags is True:
@@ -487,10 +509,7 @@ def _setup_material_from_prefix(mat, type_map, tex_flags):
     loaded = False
 
     if tex_flags.get('color') and 'color' in type_map:
-        tex = tree.nodes.new('ShaderNodeTexImage')
-        tex.location = (x_off, y)
-        tex.label = "Color"
-        tex.image = bpy.data.images.load(type_map['color'], check_existing=True)
+        tex = _create_image_node(tree, type_map['color'], "Color", x_off, y)
         tree.links.new(tex.outputs['Color'], bsdf.inputs['Base Color'])
         tree.links.new(tex.outputs['Alpha'], bsdf.inputs['Alpha'])
         y -= 300
@@ -498,18 +517,12 @@ def _setup_material_from_prefix(mat, type_map, tex_flags):
 
     for ckey, clabel in [('color2', 'Color 2'), ('color3', 'Color 3')]:
         if tex_flags.get(ckey) and ckey in type_map:
-            tex = tree.nodes.new('ShaderNodeTexImage')
-            tex.location = (x_off, y)
-            tex.label = clabel
-            tex.image = bpy.data.images.load(type_map[ckey], check_existing=True)
+            tex = _create_image_node(tree, type_map[ckey], clabel, x_off, y)
             y -= 300
             loaded = True
 
     if tex_flags.get('normal') and 'normal' in type_map:
-        tex = tree.nodes.new('ShaderNodeTexImage')
-        tex.location = (x_off, y)
-        tex.label = "Normal"
-        tex.image = bpy.data.images.load(type_map['normal'], check_existing=True)
+        tex = _create_image_node(tree, type_map['normal'], "Normal", x_off, y)
         tex.image.colorspace_settings.name = 'Non-Color'
         nmap = tree.nodes.new('ShaderNodeNormalMap')
         nmap.location = (x_off + 300, y)
@@ -519,10 +532,7 @@ def _setup_material_from_prefix(mat, type_map, tex_flags):
         loaded = True
 
     if tex_flags.get('mrao') and 'mrao' in type_map:
-        tex = tree.nodes.new('ShaderNodeTexImage')
-        tex.location = (x_off, y)
-        tex.label = "MRAO"
-        tex.image = bpy.data.images.load(type_map['mrao'], check_existing=True)
+        tex = _create_image_node(tree, type_map['mrao'], "MRAO", x_off, y)
         tex.image.colorspace_settings.name = 'Non-Color'
         sep = tree.nodes.new('ShaderNodeSeparateColor')
         sep.location = (x_off + 300, y)
@@ -533,10 +543,7 @@ def _setup_material_from_prefix(mat, type_map, tex_flags):
         loaded = True
 
     if tex_flags.get('emissive') and 'emissive' in type_map:
-        tex = tree.nodes.new('ShaderNodeTexImage')
-        tex.location = (x_off, y)
-        tex.label = "Emissive"
-        tex.image = bpy.data.images.load(type_map['emissive'], check_existing=True)
+        tex = _create_image_node(tree, type_map['emissive'], "Emissive", x_off, y)
         tree.links.new(tex.outputs['Color'], bsdf.inputs['Emission Color'])
         bsdf.inputs['Emission Strength'].default_value = 1.0
         loaded = True
@@ -648,11 +655,9 @@ def create_blender_mesh(filename, objname, flipuv, tex_flags=None):
             num_surfs = read_int(honchunk)
             num_bones = read_int(honchunk)
 
-            vlog(f"Version {version}")
-            vlog(f"{num_meshes} mesh(es)")
-            vlog(f"{num_sprites} sprite(s)")
-            vlog(f"{num_surfs} surf(s)")
-            vlog(f"{num_bones} bone(s)")
+            log(f"K2 Model v{version}: {num_meshes} mesh(es), {num_sprites} sprite(s), {num_surfs} surf(s), {num_bones} bone(s)")
+            if num_meshes == 0:
+                log("WARNING: Model file contains 0 meshes — only bones will be imported")
             vlog("Bounding box: (%f, %f, %f) - (%f, %f, %f)" % struct.unpack("<ffffff", honchunk.read(24)))
             honchunk.skip()
 

@@ -4,7 +4,6 @@ Separated from core logic for easier maintenance and modification.
 """
 
 import bpy
-from bpy.props import PointerProperty
 
 
 # ============================================================================
@@ -28,7 +27,7 @@ class K2_PT_ExportPanel(bpy.types.Panel):
         col_text = header.column()
         col_text.label(text="S2 Games")
         col_text.label(text="Model Exporter")
-        col_text.label(text="Version 4")
+        col_text.label(text="Version 1")
         icon_id = get_logo_icon()
         if icon_id:
             col_logo = header.column()

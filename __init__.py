@@ -223,7 +223,7 @@ class K2_OT_ImportTextures(bpy.types.Operator):
 
     def execute(self, context):
         import os
-        from .k2_import import assign_textures_to_objects
+        from .k2_texture import assign_textures_to_objects
         tex_dir = os.path.dirname(os.path.abspath(self.filepath))
         settings = context.scene.k2_import_settings
         tex_flags = {
